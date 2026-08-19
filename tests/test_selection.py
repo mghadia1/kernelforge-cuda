@@ -27,12 +27,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 KF_CHUNK = 1024   # must match src/v3_config.h
+V4_CHUNK = 256    # must match src/v4_config.h
 KF_MAX_K = 8
 
+# Both selections are exercised by every pipeline test below. v4's is the newer
+# and stranger one: one warp per query, k rounds of a masked lexicographic
+# max-reduction over lane registers, no shared scratch. Its distinctive failure
+# mode is a lane that fails to clear its used-bit, which returns the same
+# document k times — cheap to catch here, expensive to discover on a GPU.
+VERSIONS = ["v3", "v4"]
 
-def check(scores: np.ndarray, k: int):
+
+def check(scores: np.ndarray, k: int, version: str = "v3"):
     exp_vals, exp_idx = reference.topk(scores, k)
-    got_vals, got_idx = runner.sim_select(scores, k)
+    got_vals, got_idx = runner.sim_select(scores, k, version)
     np.testing.assert_array_equal(got_idx, exp_idx)
     np.testing.assert_allclose(got_vals, exp_vals, rtol=0, atol=0)
 
@@ -57,19 +65,23 @@ def test_rule_treats_empty_slots_as_losers():
 
 # --- the pipeline -----------------------------------------------------------
 
-@pytest.mark.parametrize("n", [1, 7, 255, 256, 257, KF_CHUNK - 1, KF_CHUNK,
-                               KF_CHUNK + 1, 3 * KF_CHUNK, 5000])
-def test_matches_reference_across_chunk_boundaries(n):
-    """N on, either side of, and far from a chunk boundary."""
+@pytest.mark.parametrize("version", VERSIONS)
+@pytest.mark.parametrize("n", [1, 7, 31, 32, 33, 255, 256, 257, KF_CHUNK - 1,
+                               KF_CHUNK, KF_CHUNK + 1, 3 * KF_CHUNK, 5000])
+def test_matches_reference_across_chunk_boundaries(n, version):
+    """N on, either side of, and far from a chunk boundary. The small sizes also
+    cover v4's lane geometry: fewer documents than one warp, exactly one warp,
+    and one more than a warp."""
     rng = np.random.default_rng(n)
     scores = rng.standard_normal((3, n), dtype=np.float32)
-    check(scores, k=min(5, n))
+    check(scores, k=min(5, n), version=version)
 
 
+@pytest.mark.parametrize("version", VERSIONS)
 @pytest.mark.parametrize("k", range(1, KF_MAX_K + 1))
-def test_every_supported_k(k):
+def test_every_supported_k(k, version):
     rng = np.random.default_rng(k)
-    check(rng.standard_normal((2, 4000), dtype=np.float32), k)
+    check(rng.standard_normal((2, 4000), dtype=np.float32), k, version)
 
 
 def test_k_outside_the_supported_range_is_rejected():
@@ -77,6 +89,31 @@ def test_k_outside_the_supported_range_is_rejected():
     for bad in (0, -1, KF_MAX_K + 1, 64):
         with pytest.raises(ValueError):
             runner.sim_select(scores, bad)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_no_document_is_selected_twice(version):
+    """v4's used-bit mask is what stops a lane re-offering the document it just
+    won. Distinct scores make any repeat obvious."""
+    rng = np.random.default_rng(99)
+    scores = rng.standard_normal((4, 4 * V4_CHUNK + 5), dtype=np.float32)
+    _, idx = runner.sim_select(scores, 8, version)
+    for row in idx:
+        assert len(set(row.tolist())) == len(row)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_all_winners_inside_one_lane(version):
+    """Every top score sits in entries that a single lane owns (indices congruent
+    mod 32 within one chunk), so one lane must give up k documents in k rounds.
+    A used-bit that never clears returns the same index k times."""
+    n = 2 * V4_CHUNK
+    scores = np.zeros((1, n), dtype=np.float32)
+    planted = [7 + 32 * e for e in range(5)]        # lane 7, entries 0..4
+    for rank, pos in enumerate(planted):
+        scores[0, pos] = 0.9 - 0.01 * rank
+    vals, idx = runner.sim_select(scores, 5, version)
+    assert idx[0].tolist() == planted
 
 
 def test_all_scores_identical_returns_the_lowest_indices():
@@ -88,13 +125,14 @@ def test_all_scores_identical_returns_the_lowest_indices():
     assert np.all(vals == 0.25)
 
 
-def test_heavy_ties_still_match_the_reference():
+@pytest.mark.parametrize("version", VERSIONS)
+def test_heavy_ties_still_match_the_reference(version):
     """Scores quantized to 8 levels over 6 chunks, so ties cross block
     boundaries and the merge stage has to resolve them the same way argsort
     does."""
     rng = np.random.default_rng(0)
     scores = (rng.integers(0, 8, size=(4, 6 * KF_CHUNK)) / 8.0).astype(np.float32)
-    check(scores, k=8)
+    check(scores, k=8, version=version)
 
 
 def test_winners_hiding_in_the_last_partial_chunk():
@@ -121,8 +159,18 @@ def test_winners_spread_one_per_chunk():
     assert idx[0].tolist() == planted[:5]
 
 
-def test_matches_the_real_embedding_size():
+@pytest.mark.parametrize("version", VERSIONS)
+def test_matches_the_real_embedding_size(version):
     """The actual retrieval case: PaperTrail's 2039 chunks against real-shaped
     normalized vectors, not a synthetic score matrix."""
     q, x = reference.make_data(2039, 8, seed=42)
-    check(reference.cosine_scores(q, x), k=5)
+    check(reference.cosine_scores(q, x), k=5, version=version)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_heavy_ties_inside_one_v4_chunk(version):
+    """Ties dense enough that several land in the same lane's entries, where v4
+    resolves them across rounds rather than in one pass."""
+    rng = np.random.default_rng(5)
+    scores = (rng.integers(0, 3, size=(3, 3 * V4_CHUNK)) / 4.0).astype(np.float32)
+    check(scores, k=8, version=version)

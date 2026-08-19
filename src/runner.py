@@ -21,7 +21,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_LIB = REPO_ROOT / "build" / "libkernelforge.so"
 SIM_LIB = REPO_ROOT / "build" / "libkfsim.so"
 
-VERSIONS = ("v0_naive", "v1_shared", "v2_warp", "v3_topk")
+VERSIONS = ("v0_naive", "v1_shared", "v2_warp", "v3_topk", "v4_batch")
 BASELINES = ("cublas",)  # library reference, not a hand-written kernel
 ALL_IMPLS = VERSIONS + BASELINES
 
@@ -208,6 +208,8 @@ def _load_sim():
         np.ctypeslib.ndpointer(np.int32, flags="C_CONTIGUOUS"),
     ]
     lib.kf_sim_v3_select.restype = ctypes.c_int
+    lib.kf_sim_v4_select.argtypes = lib.kf_sim_v3_select.argtypes
+    lib.kf_sim_v4_select.restype = ctypes.c_int
     lib.kf_sim_insert_rule.argtypes = [ctypes.c_float, ctypes.c_int,
                                        ctypes.c_float, ctypes.c_int]
     lib.kf_sim_insert_rule.restype = ctypes.c_int
@@ -215,8 +217,8 @@ def _load_sim():
     return _sim
 
 
-def sim_select(scores: np.ndarray, k: int):
-    """Run v3's decomposition over a (B, N) score matrix. Returns (vals, idx).
+def sim_select(scores: np.ndarray, k: int, version: str = "v3"):
+    """Run v3's or v4's decomposition over a (B, N) score matrix.
 
     Raises RuntimeError if the simulation is unavailable, and ValueError for a k
     the kernel itself would reject, so the test sees the same guard the GPU path
@@ -229,7 +231,8 @@ def sim_select(scores: np.ndarray, k: int):
     b, n = scores.shape
     vals = np.zeros((b, k), dtype=np.float32)
     idx = np.zeros((b, k), dtype=np.int32)
-    if lib.kf_sim_v3_select(scores, b, n, k, vals, idx) != 0:
+    fn = lib.kf_sim_v3_select if version == "v3" else lib.kf_sim_v4_select
+    if fn(scores, b, n, k, vals, idx) != 0:
         raise ValueError(f"k={k} is outside the range the kernel supports")
     return vals, idx
 

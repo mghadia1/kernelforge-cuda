@@ -9,9 +9,8 @@
  *   1. kf_v3_partial — v2's warp-per-document scoring, but each block covers a
  *      KF_CHUNK of documents, keeps their scores in shared memory, and reduces them
  *      to its own top-k. Output is gridDim.x * k candidates per query.
- *   2. kf_v3_merge   — one block per query merges those candidates into the
- *      final k. Each thread keeps a register top-k over a strided slice, then
- *      thread 0 merges the 256 partial lists.
+ *   2. kf_merge_partials (merge_topk.cuh, shared with v4) — one block per query
+ *      folds those candidates into the final k.
  *
  * Both selection steps use the same (score, index) lexicographic rule as
  * reference.py: a candidate wins on a strictly higher score, or on an equal
@@ -21,6 +20,7 @@
  */
 #include "common.cuh"
 #include "v3_config.h"
+#include "merge_topk.cuh"   /* kf_merge_partials, shared with v4 */
 
 #define WARP 32
 #define WARPS_PER_BLOCK (KF_V3_BLOCK / WARP)   /* 8 warps == 8 documents in flight */
@@ -93,42 +93,6 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
     }
 }
 
-static __global__ void kf_v3_merge(const float *__restrict__ part_vals,
-                                   const int *__restrict__ part_idx,
-                                   float *__restrict__ out_vals,
-                                   int *__restrict__ out_idx,
-                                   int n_part, int k) {
-    __shared__ float sVals[KF_MERGE_BLOCK * KF_MAX_K];
-    __shared__ int   sIdx[KF_MERGE_BLOCK * KF_MAX_K];
-
-    const int b = blockIdx.x;
-    const size_t base = (size_t)b * n_part * k;
-
-    float vals[KF_MAX_K];
-    int   idx[KF_MAX_K];
-    kf_clear(vals, idx, k);
-    for (int c = threadIdx.x; c < n_part * k; c += KF_MERGE_BLOCK)
-        kf_insert(vals, idx, k, part_vals[base + c], part_idx[base + c]);
-
-    for (int r = 0; r < k; ++r) {
-        sVals[threadIdx.x * k + r] = vals[r];
-        sIdx[threadIdx.x * k + r]  = idx[r];
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        float mv[KF_MAX_K];
-        int   mi[KF_MAX_K];
-        kf_clear(mv, mi, k);
-        for (int t = 0; t < KF_MERGE_BLOCK * k; ++t)
-            kf_insert(mv, mi, k, sVals[t], sIdx[t]);
-        for (int r = 0; r < k; ++r) {
-            out_vals[b * k + r] = mv[r];
-            out_idx[b * k + r]  = mi[r];
-        }
-    }
-}
-
 extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
                           int k, float *out_vals, int *out_idx,
                           KfTiming *timing) {
@@ -166,7 +130,7 @@ extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
         KF_CHECK(cudaEventRecord(ev0));
         kf_v3_partial<<<grid, KF_V3_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k);
         KF_CHECK(cudaGetLastError());
-        kf_v3_merge<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+        kf_merge_partials<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
         KF_CHECK(cudaEventRecord(ev1));
         KF_CHECK(cudaGetLastError());
         KF_CHECK(cudaEventSynchronize(ev1));

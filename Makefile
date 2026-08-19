@@ -15,7 +15,8 @@ PYTHON  ?= python3
 BUILD   := build
 LIB     := $(BUILD)/libkernelforge.so
 SIM     := $(BUILD)/libkfsim.so
-SRC     := src/v0_naive.cu src/v1_shared.cu src/v2_warp.cu src/v3_topk.cu src/cublas_ref.cu
+SRC     := src/v0_naive.cu src/v1_shared.cu src/v2_warp.cu src/v3_topk.cu \
+           src/v4_batch.cu src/cublas_ref.cu
 NVCCFLAGS := -O3 -std=c++14 -arch=$(ARCH) -Xcompiler -fPIC -lineinfo -Isrc
 LDLIBS    := -lcublas
 
@@ -25,7 +26,8 @@ CXX     ?= c++
 
 all: $(LIB) $(SIM)
 
-$(LIB): $(SRC) src/kernelforge.h src/common.cuh
+$(LIB): $(SRC) src/kernelforge.h src/common.cuh src/topk_rule.h \
+        src/v3_config.h src/v4_config.h src/merge_topk.cuh
 	@mkdir -p $(BUILD)
 	$(NVCC) $(NVCCFLAGS) --shared $(SRC) -o $@ $(LDLIBS)
 
@@ -37,7 +39,7 @@ $(LIB): $(SRC) src/kernelforge.h src/common.cuh
 # this does and does not prove.
 sim: $(SIM)
 
-$(SIM): src/selection_sim.cpp src/topk_rule.h src/v3_config.h
+$(SIM): src/selection_sim.cpp src/topk_rule.h src/v3_config.h src/v4_config.h
 	@mkdir -p $(BUILD)
 	$(CXX) -O2 -std=c++17 -shared -fPIC -Isrc src/selection_sim.cpp -o $@
 

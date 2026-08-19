@@ -102,10 +102,14 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=15)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="bench/results.csv")
+    ap.add_argument("--impls", default="",
+                    help="comma-separated subset of implementations to time")
     ap.add_argument("--skip-cpu-above", type=int, default=200000,
                     help="skip the NumPy baseline above this N (it gets slow)")
     ap.add_argument("--profile-once", action="store_true",
-                    help="run v3 once at one size and exit; for `ncu` runs")
+                    help="run one implementation once at one size and exit; for `ncu`")
+    ap.add_argument("--profile-impl", default="v3_topk",
+                    help="which implementation --profile-once runs")
     args = ap.parse_args()
 
     ns = [int(v) for v in args.n.split(",")]
@@ -117,7 +121,7 @@ def main() -> int:
 
     if args.profile_once:
         q, x = reference.make_data(ns[0], bs[0], seed=args.seed)
-        runner.run("v3_topk", q, x, args.k)
+        runner.run(args.profile_impl, q, x, args.k)
         return 0
 
     print(f"device: {device}")
@@ -138,8 +142,9 @@ def main() -> int:
             if n <= args.skip_cpu_above:
                 impls.append(("cpu_numpy", lambda: cpu_numpy(q, x, args.k)))
             if gpu:
+                wanted = args.impls.split(",") if args.impls else runner.ALL_IMPLS
                 impls += [(v, (lambda v=v: runner.run(v, q, x, args.k)[:2]))
-                          for v in runner.ALL_IMPLS]
+                          for v in runner.ALL_IMPLS if v in wanted]
             if torch is not None:
                 tfn = make_torch_fn(torch)
                 impls.append(("torch_gpu", lambda tfn=tfn: tfn(q, x, args.k)))
