@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # CPU-only: the NumPy reference and its tie-break rules. The GPU tests skip
+  # here by design - GitHub's hosted runners have no CUDA device.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest
+
+  # Compile gate: a CUDA devel container has nvcc but no GPU, so this proves the
+  # kernels still build (and that the shared library loads through ctypes) even
+  # though nothing here can run them. The measured numbers in bench/RESULTS.md
+  # come from a real T4, never from CI.
+  build-cuda:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.6.2-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install python
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip python3-venv
+      - name: Build every kernel version
+        run: make ARCH=sm_75
+      - name: Run tests against the built library
+        run: |
+          python3 -m pip install --break-system-packages -e '.[dev]' || python3 -m pip install -e '.[dev]'
+          python3 -m pytest
