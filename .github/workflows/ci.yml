@@ -33,7 +33,10 @@ jobs:
           apt-get install -y --no-install-recommends python3 python3-pip python3-venv
       - name: Build every kernel version
         run: make ARCH=sm_75
+      # No editable install here: this image ships a pip too old for PEP 660, and
+      # the package does not need installing anyway - pyproject sets
+      # pythonpath = ["src"], so pytest imports reference and runner directly.
       - name: Run tests against the built library
         run: |
-          python3 -m pip install --break-system-packages -e '.[dev]' || python3 -m pip install -e '.[dev]'
+          python3 -m pip install numpy pytest
           python3 -m pytest
