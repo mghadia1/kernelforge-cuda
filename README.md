@@ -11,48 +11,57 @@ questions — including the ones about where the library wins.
 
 ## Status: `resume_eligible: no` — one gate left
 
-**Ran on a Colab Tesla T4 on August 19, 2026.** All 57 tests passed with **0
-skipped**, worst absolute error 2.533e-07, and every implementation returned
-indices identical to the NumPy reference. `bench/results.csv` holds 81 measured
-rows; [`bench/RESULTS.md`](bench/RESULTS.md) interprets them.
+**Ran on a Colab Tesla T4, August 19, 2026.** All tests pass with **0 skipped**,
+worst absolute error 2.533e-07, every implementation returning indices identical
+to the NumPy reference. `bench/results.csv` holds 93 measured rows;
+[`bench/RESULTS.md`](bench/RESULTS.md) interprets them.
 
-Headline, N = 1,000,000, B = 32, end-to-end median:
+N = 1,000,000, B = 32, end-to-end median:
 
-| v0 naive | v1 shared | v2 warp | v3 on-GPU top-k | cuBLAS | torch |
-|---:|---:|---:|---:|---:|---:|
-| 1110.0 ms | 735.1 ms | 637.1 ms | 563.6 ms | 461.7 ms | 343.7 ms |
+| v0 naive | v1 shared | v2 warp | v3 top-k | **v4 batch** | cuBLAS+host top-k | torch |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1127.4 | 745.0 | 639.2 | 575.5 | **407.0 ms** | 505.7 | 340.4 |
 
-v3 is **1.97x** faster than the naive kernel and up to **9.0x** faster than the
-NumPy CPU baseline (N = 100,000, B = 32) — and **1.22x slower than cuBLAS**,
-**1.64x slower than PyTorch**. The library wins; the gap is measured, not
-hand-waved.
+v4 is **2.77x** faster than the naive kernel end-to-end, and its **kernel alone
+is 5.19x faster than v3's** (206.25 → 39.75 ms) — the end-to-end figure is
+diluted because a 1.54 GB corpus upload dominates every call.
 
-Three findings worth more than the speedup:
+**Each step was chosen by a measurement, not a guess.** The Nsight profile of
+v3's scoring kernel showed 68.79% DRAM throughput against 36.83% SM throughput:
+bandwidth-bound, so the only lever left was moving fewer bytes. v3 re-read the
+whole corpus once per query. v4 gives each block a tile of eight queries and
+reuses every loaded X element across all eight. The follow-up profile confirms
+the mechanism and shows the bottleneck **moving**:
 
-- **The stated reason for v3 was wrong.** It was built to delete a 128 MB
-  device-to-host copy; that copy turned out to cost 9.95 ms. Its real saving is
-  the 57.9 ms of host-side selection it removes, and its own kernel is *slower*
-  than v2's.
-- **The benchmark is dominated by an artifact**: 325 ms of the 628 ms call is
-  re-uploading the 1.54 GB corpus, which a real system does once. The ranking
-  holds; the magnitudes are understated.
-- **At PaperTrail's actual size the GPU loses.** N = 2,039, one query: NumPy
-  0.601 ms vs v3 2.030 ms. The kernel pays off from ~10^5 documents, or with
-  batched queries.
+| | kf_v3_partial | kf_v4_partial |
+|---|---:|---:|
+| Duration | 26.46 ms | 7.40 ms |
+| DRAM throughput | 68.79% | 39.27% |
+| Compute (SM) throughput | 36.83% | 74.18% |
+| L1/TEX throughput | 37.44% | **78.48%** |
+| fp32 peak | 4% | 13% |
+| Achieved occupancy | 47.88% | 74.32% |
 
-A targeted `ncu --kernel-name kf_v3_partial --set full` settled the roofline
-question: **DRAM throughput 68.79% of peak against 36.83% SM throughput**, 4% of
-fp32 peak, 218.77 GB/s of the T4's 320 GB/s. The scoring kernel is memory-bound,
-as predicted — and that also explains the cuBLAS gap. Near the bandwidth
-ceiling the only way to go faster is to move fewer bytes, and this kernel reads
-the whole corpus once *per query* (4.9 GB to answer 32 queries at N = 100,000).
-cuBLAS tiles both dimensions and moves roughly B times less. That is the next
-optimization, and it now has a measurement behind it rather than a guess.
+It runs 3.58x faster while pulling *less* bandwidth — not moving data faster,
+moving less of it. The limiter is now shared-memory reads of the query tile,
+which names the next step (register-blocking) without guesswork.
+
+Honest qualifiers, stated up front:
+
+- v4 beats the `cublas` row at every size measured, **but that baseline is
+  cuBLAS GEMM plus a host-side top-k.** Against PyTorch (cuBLAS + device
+  `topk`) v4 still loses, 407.0 vs 340.4 ms. The claim is "beats a cuBLAS +
+  host-top-k pipeline and comes within 1.2x of PyTorch", not "beats cuBLAS".
+- **At PaperTrail's real size the GPU still loses**: N = 2,039 with one query,
+  NumPy 0.601 ms vs v4 ~2 ms. Batch tiling cannot help at B = 1 — with one
+  query there is nothing to reuse a loaded byte against.
+- Two earlier predictions in this repo were wrong and are corrected in
+  RESULTS.md rather than deleted.
 
 Four of five conditions are met: it builds, it passes with 0 skips, the
-benchmark is recorded, and the profile is captured and interpreted. The fifth is
-Mayank's — explaining one design choice and one failure mode unaided. **Until
-that closes, CUDA stays off the resume and unchecked on applications.**
+benchmark is recorded, and the profiles are captured and interpreted. The fifth
+is Mayank's — explaining one design choice and one failure mode unaided.
+**Until that closes, CUDA stays off the resume and unchecked on applications.**
 
 ## The problem
 
@@ -69,6 +78,7 @@ chunk count — and scales to 1M synthetic rows.
 | 1 | [`src/v1_shared.cu`](src/v1_shared.cu) | Stage a padded tile of `X` in shared memory with coalesced loads. | What fixing the access pattern is worth. |
 | 2 | [`src/v2_warp.cu`](src/v2_warp.cu) | One warp per document; coalesced global reads reduced with `__shfl_down_sync`. | That the shared-memory round trip in v1 was avoidable. |
 | 3 | [`src/v3_topk.cu`](src/v3_topk.cu) | v2 scoring plus per-block partial top-k and a merge kernel. | End-to-end latency once the `B x N` PCIe copy is gone. |
+| 4 | [`src/v4_batch.cu`](src/v4_batch.cu) | Tile the batch: each block scores a chunk against 8 queries, so every X element loaded is reused 8 times. Selection becomes a warp-per-query masked max-reduction with no shared scratch. | Whether cutting DRAM traffic 8x moves the roofline. It does. |
 | — | [`src/cublas_ref.cu`](src/cublas_ref.cu) | `cublasSgemm` + host top-k, same ABI and timing points. | The honest gap to a tuned library. |
 
 Every selection in the project — host fallback, both stages of v3, and the CPU

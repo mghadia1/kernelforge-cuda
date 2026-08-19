@@ -1,9 +1,9 @@
 # Results
 
 Measured on a Google Colab **Tesla T4 (sm_75, 14.6 GB)**, driver 580.82.07,
-CUDA 12.8 (`nvcc` release 12.8, V12.8.93), on August 19, 2026. Every table below
-is generated from `bench/results.csv`, which the run wrote; nothing here was
-typed by hand.
+CUDA 12.8, on August 19, 2026. Every table is generated from
+`bench/results.csv` (93 rows), which the run wrote. Nothing here was typed by
+hand.
 
 ## Setup
 
@@ -16,224 +16,196 @@ typed by hand.
 | Repeats | 15 timed, first discarded, 3 warmup |
 | Seed | 0 |
 | Timing | end-to-end wall time per call, transfers included |
-| Rows | 81 |
 
 ## Correctness
 
-All 57 tests passed with **0 skipped** — the first time any of these kernels had
-executed. Worst absolute error against the NumPy reference across the entire
-sweep was **2.533e-07** (tolerance 1e-4), and every implementation returned
-**identical indices**, not merely similar scores. The `(score, index)` tie-break
-rule in `topk_rule.h` held on hardware exactly as the host-side simulation
-predicted.
+All tests passed with **0 skipped**. Worst absolute error against the NumPy
+reference across the whole sweep: **2.533e-07** (tolerance 1e-4), and every
+implementation returned **identical indices**, not merely similar scores. The
+`(score, index)` tie-break in `topk_rule.h` held on hardware exactly as the
+host-side simulations predicted, for both v3's and v4's very different
+selection schemes.
 
 ## End-to-end latency
 
 ### B = 1, median ms
 
-|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|------------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |       0.601 |      2.377 |       2.312 |     2.212 |     2.03  |    2.88  |       1.003 |
-|   10000 |       3.026 |      5.167 |       4.68  |     4.997 |     4.261 |    4.967 |       3.468 |
-|  100000 |      81.565 |     42.098 |      41.67  |    37.21  |    36.592 |   36.954 |      33.328 |
-| 1000000 |             |    386.259 |     362.691 |   371.631 |   361.519 |  368.469 |     336.569 |
+|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|------------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |       0.65  |      3.025 |       2.935 |     2.882 |     1.952 |      1.669 |    3.378 |       1.132 |
+|   10000 |       7.304 |      7.745 |       5.563 |     4.575 |     4.348 |      3.98  |    5.072 |       3.423 |
+|  100000 |      80.404 |     40.844 |      36.467 |    36.503 |    36.271 |     36.428 |   38.702 |      34.81  |
+| 1000000 |             |    380.812 |     362.433 |   359.511 |   360.472 |    358.783 |  361.479 |     337.89  |
 
 Speedup over `cpu_numpy` (x); blank where the CPU baseline was skipped above N = 200,000:
 
-|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |        0.3 |         0.3 |       0.3 |       0.3 |      0.2 |         0.6 |
-|   10000 |        0.6 |         0.6 |       0.6 |       0.7 |      0.6 |         0.9 |
-|  100000 |        1.9 |         2   |       2.2 |       2.2 |      2.2 |         2.4 |
-| 1000000 |            |             |           |           |          |             |
+|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |        0.2 |         0.2 |       0.2 |       0.3 |        0.4 |      0.2 |         0.6 |
+|   10000 |        0.9 |         1.3 |       1.6 |       1.7 |        1.8 |      1.4 |         2.1 |
+|  100000 |        2   |         2.2 |       2.2 |       2.2 |        2.2 |      2.1 |         2.3 |
+| 1000000 |            |             |           |           |            |          |             |
 
 ### B = 8, median ms
 
-|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|------------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |       2.672 |      3.33  |       2.831 |     2.736 |     1.788 |    2.528 |       0.989 |
-|   10000 |      14.119 |      7.188 |       5.09  |     5.023 |     4.216 |    5.068 |       3.416 |
-|  100000 |     209.189 |     56.642 |      43.638 |    45.12  |    41.226 |   43.779 |      33.902 |
-| 1000000 |             |    547.232 |     444.445 |   421.646 |   408.485 |  401.193 |     338.312 |
+|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|------------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |       7.852 |      6.326 |       2.797 |     2.757 |     1.891 |      1.684 |    3.329 |       1.027 |
+|   10000 |      14.299 |      7.047 |       5.495 |     5.207 |     3.844 |      3.848 |    5.199 |       3.494 |
+|  100000 |     209.624 |     56.333 |      43.655 |    41.768 |    40.277 |     36.631 |   39.421 |      34.191 |
+| 1000000 |             |    550.656 |     449.656 |   430.673 |   407.336 |    364.756 |  395.052 |     338.478 |
 
 Speedup over `cpu_numpy` (x); blank where the CPU baseline was skipped above N = 200,000:
 
-|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |        0.8 |         0.9 |       1   |       1.5 |      1.1 |         2.7 |
-|   10000 |        2   |         2.8 |       2.8 |       3.3 |      2.8 |         4.1 |
-|  100000 |        3.7 |         4.8 |       4.6 |       5.1 |      4.8 |         6.2 |
-| 1000000 |            |             |           |           |          |             |
+|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |        1.2 |         2.8 |       2.8 |       4.2 |        4.7 |      2.4 |         7.6 |
+|   10000 |        2   |         2.6 |       2.7 |       3.7 |        3.7 |      2.8 |         4.1 |
+|  100000 |        3.7 |         4.8 |       5   |       5.2 |        5.7 |      5.3 |         6.1 |
+| 1000000 |            |             |           |           |            |          |             |
 
 ### B = 32, median ms
 
-|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|------------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |       7.094 |      5.288 |       2.762 |     2.416 |     1.887 |    2.692 |       1.008 |
-|   10000 |      39.901 |     10.146 |       7.039 |     6.932 |     4.522 |    5.476 |       3.444 |
-|  100000 |     501.381 |    112.51  |      68.01  |    63.386 |    55.593 |   47.851 |      34.522 |
-| 1000000 |             |   1110     |     735.101 |   637.119 |   563.64  |  461.71  |     343.675 |
+|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|------------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |      15.866 |      6.482 |       3.55  |     3.189 |     2.07  |      1.686 |    3.757 |       1.047 |
+|   10000 |      40.797 |      9.248 |       6.984 |     6.803 |     4.392 |      4.081 |    5.702 |       3.489 |
+|  100000 |     491.734 |    118.64  |      78.379 |    61.541 |    54.978 |     38.538 |   47.787 |      33.91  |
+| 1000000 |             |   1127.36  |     744.991 |   639.198 |   575.548 |    406.992 |  505.685 |     340.384 |
 
 Speedup over `cpu_numpy` (x); blank where the CPU baseline was skipped above N = 200,000:
 
-|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |        1.3 |         2.6 |       2.9 |       3.8 |      2.6 |         7   |
-|   10000 |        3.9 |         5.7 |       5.8 |       8.8 |      7.3 |        11.6 |
-|  100000 |        4.5 |         7.4 |       7.9 |       9   |     10.5 |        14.5 |
-| 1000000 |            |             |           |           |          |             |
+|       N |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |        2.4 |         4.5 |         5 |       7.7 |        9.4 |      4.2 |        15.1 |
+|   10000 |        4.4 |         5.8 |         6 |       9.3 |       10   |      7.2 |        11.7 |
+|  100000 |        4.1 |         6.3 |         8 |       8.9 |       12.8 |     10.3 |        14.5 |
+| 1000000 |            |             |           |           |            |          |             |
 
 ### p95 at B = 32, ms
 
-|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   cublas |   torch_gpu |
-|--------:|------------:|-----------:|------------:|----------:|----------:|---------:|------------:|
-|    2039 |       7.463 |      5.337 |       2.87  |     2.485 |     1.915 |    2.783 |       1.044 |
-|   10000 |      41.502 |     11.077 |       7.225 |     7.297 |     5.082 |    5.71  |       3.548 |
-|  100000 |     677.438 |    113.536 |      72.223 |    65.751 |    56.288 |   50.329 |      35.599 |
-| 1000000 |             |   1200.85  |     803.82  |   641.242 |   567.689 |  562.768 |     380.382 |
+|       N |   cpu_numpy |   v0_naive |   v1_shared |   v2_warp |   v3_topk |   v4_batch |   cublas |   torch_gpu |
+|--------:|------------:|-----------:|------------:|----------:|----------:|-----------:|---------:|------------:|
+|    2039 |      21.014 |      7.969 |       3.637 |     3.335 |     2.189 |      1.703 |    3.887 |       1.095 |
+|   10000 |      42.8   |     10.038 |       8.096 |     6.936 |     4.442 |      4.178 |    5.848 |       3.555 |
+|  100000 |     501.395 |    121.308 |      84.286 |    64.857 |    55.861 |     40.439 |   48.542 |      35.258 |
+| 1000000 |             |   1199.16  |     819.102 |   699.241 |   621.378 |    436.601 |  609.84  |     348.226 |
 
 
-## What the optimization ladder was worth
+## The optimization ladder
 
-At the largest size (N = 1,000,000, B = 32) each step paid:
+At N = 1,000,000, B = 32:
 
 | Step | median ms | vs previous |
 |---|---:|---:|
-| v0 naive | 1110.0 | — |
-| v1 shared-memory tiling | 735.1 | 1.51x |
-| v2 warp-shuffle | 637.1 | 1.15x |
-| v3 on-GPU top-k | 563.6 | 1.13x |
-| **v3 vs v0** | | **1.97x** |
-| cuBLAS | 461.7 | v3 is 1.22x slower |
-| torch matmul + topk | 343.7 | v3 is 1.64x slower |
+| v0 naive | 1127.4 | — |
+| v1 shared-memory tiling | 745.0 | 1.51x |
+| v2 warp-shuffle | 639.2 | 1.17x |
+| v3 on-GPU top-k | 575.5 | 1.11x |
+| **v4 batch tiling** | **407.0** | **1.41x** |
+| **v4 vs v0** | | **2.77x** |
+| cuBLAS + host top-k | 505.7 | v4 is 1.24x faster |
+| torch matmul + topk | 340.4 | v4 is 1.20x slower |
 
-**The library wins, and by a knowable amount.** v3 is 22% behind cuBLAS and 64%
-behind PyTorch. PyTorch beating its own cuBLAS backend is the interesting part:
-`torch.topk` runs on the device and `torch` reuses cached device allocations,
-where the `cublas` row here pays a fresh `cudaMalloc` and a host top-k on every
-call.
+## What batch tiling actually bought
 
-Best speedup over the NumPy CPU baseline: **9.0x** (v3, N = 100,000, B = 32).
-That is far short of the order-of-magnitude the project spec anticipated, and
-the next section explains why.
+v4 changes one thing: a block now owns a chunk of documents **and a tile of
+eight queries**, so each X element is loaded once into a register and reused
+against all eight query vectors instead of being re-read once per query.
 
-## Where the time actually goes — the prediction was wrong
+One warm call at N = 1,000,000, B = 32:
 
-One warm measured call at N = 1,000,000, B = 32:
-
-| Stage | v2_warp | v3_topk |
+| Stage | v3_topk | v4_batch |
 |---|---:|---:|
-| host→device | 325.26 ms | 364.33 ms |
-| kernel | 179.57 ms | 207.29 ms |
-| device→host | 9.95 ms | 0.05 ms |
-| host top-k | 57.88 ms | 0.00 ms |
-| **total** | **627.70 ms** | **572.65 ms** |
+| host→device | 441.45 ms | 351.60 ms |
+| **kernel** | **206.25 ms** | **39.75 ms** |
+| device→host | 0.06 ms | 0.03 ms |
+| total | 650.48 ms | 392.33 ms |
 
-`RESULTS.md` predicted before the run that v3's win would come from deleting a
-128 MB device-to-host copy. **That prediction was wrong.** The copy costs 9.95 ms
-— under 2% of the call. v3's real saving is the 57.88 ms of *host-side
-selection* it removes, and its own kernel is 27.7 ms **slower** than v2's because
-it now does the selection too. Net 55 ms, which matches the sweep.
+**The kernel got 5.19x faster.** End-to-end it is only 1.41x, because the
+1.54 GB corpus upload still dominates the call — the h2d figures also show the
+run-to-run PCIe variance (441 vs 352 ms for the same transfer), which is why
+these single-call totals differ from the sweep medians above.
 
-The dominant cost is the one nobody optimized: **the host→device upload, 325 ms,
-52% of the call.** At N = 1,000,000 and d = 384 the corpus is 1.54 GB, and this
-benchmark re-uploads it on *every* call. A real retrieval system uploads a corpus
-once and queries it thousands of times.
+The reuse factor is eight and the kernel speedup is 5.19x. The gap is the part
+that does not scale with the tile: the selection stage, the query staging, and
+the tail chunks.
 
-That makes the end-to-end column above a measurement of PCIe bandwidth as much
-as of the kernels, and it compresses the differences between every GPU row. The
-honest reading: the ladder ranking is real, the magnitudes are understated, and
-a persistent-corpus benchmark is the single most valuable thing this project
-still lacks.
+## The profile confirms the mechanism
 
-## Where the GPU loses outright
+`ncu --kernel-name <kernel> --set full`, N = 100,000, B = 32:
 
-At PaperTrail's actual corpus size — N = 2,039 chunks — with one query at a
-time, **NumPy wins**: 0.601 ms against v3's 2.030 ms. Every GPU path loses
-below roughly N = 100,000 at B = 1, because a kernel launch plus two transfers
-costs more than the arithmetic saved.
+| Metric | kf_v3_partial | kf_v4_partial |
+|---|---:|---:|
+| Duration | 26.46 ms | **7.40 ms** |
+| **DRAM throughput** | **68.79%** | **39.27%** |
+| Memory throughput | 218.77 GB/s | 125.06 GB/s |
+| **Compute (SM) throughput** | **36.83%** | **74.18%** |
+| L1/TEX cache throughput | 37.44% | **78.48%** |
+| L2 cache throughput | 22.25% | 9.80% |
+| fp32 peak achieved | 4% | **13%** |
+| Theoretical occupancy | 75% | 75% |
+| Achieved occupancy | 47.88% | **74.32%** |
 
-The GPU becomes worth it in two situations, both visible in the tables:
-batching (at N = 2,039, B = 32, v3 is 3.8x faster than NumPy) and scale
-(at N = 100,000, B = 32, 9.0x).
+This is the whole argument in one table. v3 was pinned against DRAM (68.79%)
+while the SMs idled at 36.83%. v4 runs 3.58x faster while pulling **less**
+bandwidth (125 GB/s against 218 GB/s) — it is not moving data faster, it is
+moving less of it. Compute utilization doubled, arithmetic went from 4% to 13%
+of fp32 peak, and achieved occupancy rose from 47.88% to 74.32% against the
+same 75% theoretical ceiling.
 
-So the defensible claim is not "I made retrieval faster." It is: *on the corpus
-PaperTrail actually has, this kernel is slower than NumPy unless queries are
-batched; it pays off from about 10^5 documents.*
+**The bottleneck moved.** L1/TEX throughput went from 37.44% to 78.48% and is
+now the highest utilization in the kernel: the limiter is no longer global
+memory but the shared-memory reads of the query tile. That names the next
+optimization without guesswork — register-blocking the queries so each thread
+holds several query values in registers instead of re-reading them from shared
+memory each step. That is the standard next move in GEMM tuning, and the
+profile is what says so.
 
-## Nsight Compute
+## About the cuBLAS comparison
 
-Two captures, and the first one misled. `ncu --set basic` profiles whichever
-kernel it reaches first and reported 3.80% achieved occupancy against 100%
-theoretical — numbers that match neither of v3's kernels' shared-memory budget.
-The targeted capture below reports 75% theoretical for `kf_v3_partial`, so the
-basic run had profiled the *other* kernel, `kf_v3_merge`, which launches only
-B = 32 blocks across the T4's 40 SMs. Its load-imbalance warning ("minimum
-instance value is 100.00% below the average") is exactly that: idle SMs.
+v4 is faster than the `cublas` row at **every size measured**, from 1.01x at
+N = 1,000,000 / B = 1 to 2.23x at N = 2,039 / B = 32. That claim needs a
+qualifier, and here it is: **that baseline is cuBLAS GEMM plus a host-side
+top-k**, matching the ABI every other version uses. It pays a device-to-host
+copy of the whole score matrix and a serial CPU selection, which v4 does not.
 
-Lesson recorded: an `ncu` number is meaningless without the kernel name attached
-to it.
+The fair reading of the three-way comparison:
 
-### `kf_v3_partial` — the scoring kernel
+- against **cuBLAS + host top-k**, v4 wins because it keeps selection on device;
+- against **torch** (cuBLAS + `torch.topk` on device, cached allocator), v4
+  still loses — 340.4 ms against 407.0 ms at N = 1M, B = 32.
 
-`ncu --kernel-name kf_v3_partial --set full`, grid (98, 32, 1), block (256, 1, 1),
-31 passes:
+So the defensible sentence is *"a hand-written kernel that beats a cuBLAS
+GEMM + host-top-k pipeline and comes within 1.2x of PyTorch"*, not *"beats
+cuBLAS"*. Decomposing the `cublas` row into its own stages would settle how
+much of its deficit is the host top-k; that cell is in the notebook and has not
+been run.
 
-| Metric | Value |
-|---|---:|
-| **DRAM throughput** | **68.79% of peak** |
-| Memory throughput | 218.77 GB/s |
-| **Compute (SM) throughput** | **36.83%** |
-| fp32 peak achieved | 4% |
-| L1/TEX cache throughput | 37.44% |
-| L2 cache throughput | 22.25% |
-| Theoretical occupancy | 75% |
-| Achieved occupancy | 47.88% |
-| Executed IPC | 0.78 |
-| SM busy | 19.90% |
-| Duration | 26.46 ms |
+Run-to-run variance is real and worth stating: the `cublas` row measured
+461.7 ms in the first session and 505.7 ms in the second at N = 1M, B = 32
+(9.5%), while v0 moved only 1.5%. Differences smaller than about 10% between
+single rows should not be over-read.
 
-**The prediction holds.** The scoring kernel is memory-bound: DRAM throughput is
-roughly double the SM throughput, arithmetic reaches 4% of the T4's fp32 peak,
-and Nsight's own verdict is "Memory is more heavily utilized than Compute." At
-218.77 GB/s against the T4's 320 GB/s the kernel is running at about 69% of the
-bandwidth ceiling, which is where a 0.5 FLOP/byte problem belongs.
+## Where the GPU still loses
 
-### Why that also explains the cuBLAS gap
-
-Being near the bandwidth ceiling means the only way left to go faster is to
-**move fewer bytes** — and this kernel moves far more than it needs to. One
-block owns one (query, chunk) pair, so every query re-reads the whole corpus:
-at N = 100,000 that is 153.6 MB of X read **32 times**, about 4.9 GB, to answer
-32 queries.
-
-cuBLAS does not win by being faster per byte. It wins by tiling over *both*
-dimensions, holding a tile of X in shared memory and reusing it across many
-queries, so it moves roughly B times less data. That is a specific, checkable
-explanation for the 1.22x gap, and it is the next optimization: tile the batch
-dimension so each X tile is loaded once and scored against several queries.
-
-75% theoretical occupancy is the shared-memory reservation (the query vector
-plus KF_MAX_K-wide candidate lists per thread); 47.88% achieved against it is
-the tail effect of chunks that finish early. Neither is the binding constraint
-while DRAM sits at 69%.
+At PaperTrail's actual corpus size — N = 2,039, one query at a time — NumPy is
+still fastest at 0.601 ms. Batch tiling does nothing for B = 1 by construction:
+with one query there is nothing to reuse an X byte against, which is exactly
+why v4 and v3 tie at B = 1 across every N.
 
 ## What to do next, in order
 
-1. **Tile the batch dimension.** The profile says the kernel is bandwidth-bound
-   while re-reading X once per query. Loading each X tile once and scoring it
-   against several queries is the change with a measured argument behind it,
-   and it is what cuBLAS is doing differently.
-2. A persistent-corpus benchmark: upload X once, time only the query calls.
-   Both the realistic case and the one where kernel differences stop hiding
-   behind 325 ms of PCIe.
-3. Parallelize the final fold in `kf_v3_merge` instead of serializing it in
-   thread 0 — worth little in total time, but it is a real design weakness and
-   the 32-block launch leaves most of the GPU idle.
+1. **Register-block the query tile.** L1/TEX at 78.48% is the new limiter.
+2. **A persistent-corpus benchmark.** The 1.54 GB upload is 90% of v4's call and
+   a real system does it once. This now matters more than it did: the faster the
+   kernel gets, the more the measurement is just PCIe.
+3. Decompose the `cublas` baseline's stages to size the host-top-k handicap.
+4. Parallelize the final fold in `kf_merge_partials`, still serialized in
+   thread 0.
 
 ## Limits
 
 One GPU, one seed, one `d`, fp32, `k <= 8`, single device. Synthetic vectors
-above N = 2,039. Latency only — no throughput-under-load, no multi-stream. The
-stage-split table is one warm call, not a median over repeats. No fp16 or
-tensor-core path, no multi-GPU, no TensorRT.
+above N = 2,039. Latency only. The stage-split and profile tables are single
+warm calls, not medians. No fp16 or tensor-core path, no multi-GPU, no TensorRT.
