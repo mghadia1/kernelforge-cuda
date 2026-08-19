@@ -9,31 +9,44 @@ The goal is not to beat NVIDIA's libraries. It is to show GPU computing,
 parallel programming, and performance analysis with numbers that survive
 questions — including the ones about where the library wins.
 
-## Status: `resume_eligible: no`
+## Status: `resume_eligible: no` — one gate left
 
-**The kernels compile but have never been executed.** CI builds all five with
-`nvcc` for `sm_75`, and 30 tests pass on CPU — but every test that would run a
-kernel is skipped, because there is no GPU on the development machine. Nothing
-here has produced a measured result. `bench/RESULTS.md` contains no numbers,
-CUDA is not on the resume, and it is not checked off on any application.
+**Ran on a Colab Tesla T4 on August 19, 2026.** All 57 tests passed with **0
+skipped**, worst absolute error 2.533e-07, and every implementation returned
+indices identical to the NumPy reference. `bench/results.csv` holds 81 measured
+rows; [`bench/RESULTS.md`](bench/RESULTS.md) interprets them.
 
-What *is* established without a GPU: the NumPy reference is right, the
-`(score, index)` comparison rule is right, and v3's two-stage selection produces
-the reference answer under adversarial inputs — heavy ties, chunk boundaries,
-winners hidden in the tail — because `src/selection_sim.cpp` runs that exact
-decomposition on the host. See
-[`docs/how-it-works.md`](docs/how-it-works.md#what-is-verified-and-where) for
-what that does and does not prove.
+Headline, N = 1,000,000, B = 32, end-to-end median:
 
-What flips this to `resume_eligible: yes`:
+| v0 naive | v1 shared | v2 warp | v3 on-GPU top-k | cuBLAS | torch |
+|---:|---:|---:|---:|---:|---:|
+| 1110.0 ms | 735.1 ms | 637.1 ms | 563.6 ms | 461.7 ms | 343.7 ms |
 
-1. `make` succeeds on a Colab/Kaggle T4;
-2. `pytest` passes there with the GPU tests actually running, not skipping;
-3. `make bench` fills in `bench/results.csv` and `bench/RESULTS.md`;
-4. an Nsight Compute profile of v3 is captured and interpreted;
-5. one design choice and one failure mode can be explained unaided.
+v3 is **1.97x** faster than the naive kernel and up to **9.0x** faster than the
+NumPy CPU baseline (N = 100,000, B = 32) — and **1.22x slower than cuBLAS**,
+**1.64x slower than PyTorch**. The library wins; the gap is measured, not
+hand-waved.
 
-Until all five are true this is an unproven repo, and it is described that way.
+Three findings worth more than the speedup:
+
+- **The stated reason for v3 was wrong.** It was built to delete a 128 MB
+  device-to-host copy; that copy turned out to cost 9.95 ms. Its real saving is
+  the 57.9 ms of host-side selection it removes, and its own kernel is *slower*
+  than v2's.
+- **The benchmark is dominated by an artifact**: 325 ms of the 628 ms call is
+  re-uploading the 1.54 GB corpus, which a real system does once. The ranking
+  holds; the magnitudes are understated.
+- **At PaperTrail's actual size the GPU loses.** N = 2,039, one query: NumPy
+  0.601 ms vs v3 2.030 ms. The kernel pays off from ~10^5 documents, or with
+  batched queries.
+
+Four of five conditions are now met: it builds, it passes with 0 skips, the
+benchmark is recorded, and the Nsight capture is interpreted — including the
+part it failed to establish (the roofline claim is explicitly still open, and
+occupancy came back at 3.80%, which exposed a real serialization in the merge
+kernel). The fifth is Mayank's: explaining one design choice and one failure
+mode unaided. **Until that closes, CUDA stays off the resume and unchecked on
+applications.**
 
 ## The problem
 
