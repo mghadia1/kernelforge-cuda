@@ -134,7 +134,8 @@ docs/        how-it-works.md - the optimization story and what is verified where
 bench/       run.py (sweep) and RESULTS.md (interpretation)
 colab/       KernelForge_T4.ipynb - the whole run on a Colab T4
 tests/       test_correctness.py (kernels vs reference), test_selection.py (v3 logic, no GPU)
-Makefile     nvcc build, `make test`, `make bench`, `make profile`
+Makefile     nvcc build, `make sim`, `make test`, `make bench`, `make profile`
+Dockerfile   the CI build/verify environment; compiles but cannot run the kernels
 ```
 
 See [`PROJECT_SPEC.md`](PROJECT_SPEC.md) for the full plan and
