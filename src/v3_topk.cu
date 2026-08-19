@@ -7,7 +7,7 @@
  *
  * Two kernels:
  *   1. kf_v3_partial — v2's warp-per-document scoring, but each block covers a
- *      CHUNK of documents, keeps their scores in shared memory, and reduces them
+ *      KF_CHUNK of documents, keeps their scores in shared memory, and reduces them
  *      to its own top-k. Output is gridDim.x * k candidates per query.
  *   2. kf_v3_merge   — one block per query merges those candidates into the
  *      final k. Each thread keeps a register top-k over a strided slice, then
@@ -20,32 +20,10 @@
  * just values.
  */
 #include "common.cuh"
+#include "v3_config.h"
 
 #define WARP 32
-#define WARPS_PER_BLOCK 8
-#define V3_BLOCK (WARP * WARPS_PER_BLOCK)   /* 256 threads */
-#define CHUNK 1024                          /* documents scored per block */
-#define KF_MAX_K 8   /* caps shared-memory reservation; k = 5 in practice */
-#define MERGE_BLOCK 256
-
-/* Insert (s, idx) into a descending list of length k held in registers or
- * shared memory. Empty slots are marked with idx < 0. */
-static __device__ __forceinline__ void kf_dev_insert(float *vals, int *idx,
-                                                     int k, float s, int i) {
-    if (i < 0) return;
-    int last = k - 1;
-    if (idx[last] >= 0 && (s < vals[last] || (s == vals[last] && i > idx[last])))
-        return;
-    int j = last;
-    while (j > 0 && (idx[j - 1] < 0 ||
-                     s > vals[j - 1] || (s == vals[j - 1] && i < idx[j - 1]))) {
-        vals[j] = vals[j - 1];
-        idx[j]  = idx[j - 1];
-        --j;
-    }
-    vals[j] = s;
-    idx[j]  = i;
-}
+#define WARPS_PER_BLOCK (KF_V3_BLOCK / WARP)   /* 8 warps == 8 documents in flight */
 
 static __global__ void kf_v3_partial(const float *__restrict__ q,
                                      const float *__restrict__ X,
@@ -54,18 +32,18 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
                                      int N, int d, int k) {
     extern __shared__ float smem[];
     float *sQ     = smem;              /* d floats  */
-    float *sScore = smem + d;          /* CHUNK floats */
+    float *sScore = smem + d;          /* KF_CHUNK floats */
 
     const int lane   = threadIdx.x & (WARP - 1);
     const int warpId = threadIdx.x >> 5;
     const int b      = blockIdx.y;
-    const int base   = blockIdx.x * CHUNK;
+    const int base   = blockIdx.x * KF_CHUNK;
 
-    for (int i = threadIdx.x; i < d; i += V3_BLOCK) sQ[i] = q[(size_t)b * d + i];
+    for (int i = threadIdx.x; i < d; i += KF_V3_BLOCK) sQ[i] = q[(size_t)b * d + i];
     __syncthreads();
 
-    /* Warp-per-document scoring, each warp walking CHUNK/WARPS_PER_BLOCK rows. */
-    for (int w = warpId; w < CHUNK; w += WARPS_PER_BLOCK) {
+    /* Warp-per-document scoring, each warp walking KF_CHUNK/WARPS_PER_BLOCK rows. */
+    for (int w = warpId; w < KF_CHUNK; w += WARPS_PER_BLOCK) {
         const int n = base + w;
         float acc = 0.0f;
         if (n < N) {
@@ -83,10 +61,10 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
      * strided slice of the chunk, then thread 0 merges the slices. */
     float vals[KF_MAX_K];
     int   idx[KF_MAX_K];
-    for (int r = 0; r < k; ++r) { vals[r] = -FLT_MAX; idx[r] = -1; }
-    for (int w = threadIdx.x; w < CHUNK; w += V3_BLOCK) {
+    kf_clear(vals, idx, k);
+    for (int w = threadIdx.x; w < KF_CHUNK; w += KF_V3_BLOCK) {
         const int n = base + w;
-        if (n < N) kf_dev_insert(vals, idx, k, sScore[w], n);
+        if (n < N) kf_insert(vals, idx, k, sScore[w], n);
     }
 
     /* sScore is reused as the candidate scratch, so every thread must be done
@@ -94,7 +72,7 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
     __syncthreads();
 
     float *sVals = sScore;                       /* reuse: scores are consumed */
-    int   *sIdx  = (int *)(sScore + V3_BLOCK * KF_MAX_K);
+    int   *sIdx  = (int *)(sScore + KF_V3_BLOCK * KF_MAX_K);
     for (int r = 0; r < k; ++r) {
         sVals[threadIdx.x * k + r] = vals[r];
         sIdx[threadIdx.x * k + r]  = idx[r];
@@ -104,9 +82,9 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
     if (threadIdx.x == 0) {
         float mv[KF_MAX_K];
         int   mi[KF_MAX_K];
-        for (int r = 0; r < k; ++r) { mv[r] = -FLT_MAX; mi[r] = -1; }
-        for (int t = 0; t < V3_BLOCK * k; ++t)
-            kf_dev_insert(mv, mi, k, sVals[t], sIdx[t]);
+        kf_clear(mv, mi, k);
+        for (int t = 0; t < KF_V3_BLOCK * k; ++t)
+            kf_insert(mv, mi, k, sVals[t], sIdx[t]);
         const size_t out = ((size_t)b * gridDim.x + blockIdx.x) * k;
         for (int r = 0; r < k; ++r) {
             part_vals[out + r] = mv[r];
@@ -120,17 +98,17 @@ static __global__ void kf_v3_merge(const float *__restrict__ part_vals,
                                    float *__restrict__ out_vals,
                                    int *__restrict__ out_idx,
                                    int n_part, int k) {
-    __shared__ float sVals[MERGE_BLOCK * KF_MAX_K];
-    __shared__ int   sIdx[MERGE_BLOCK * KF_MAX_K];
+    __shared__ float sVals[KF_MERGE_BLOCK * KF_MAX_K];
+    __shared__ int   sIdx[KF_MERGE_BLOCK * KF_MAX_K];
 
     const int b = blockIdx.x;
     const size_t base = (size_t)b * n_part * k;
 
     float vals[KF_MAX_K];
     int   idx[KF_MAX_K];
-    for (int r = 0; r < k; ++r) { vals[r] = -FLT_MAX; idx[r] = -1; }
-    for (int c = threadIdx.x; c < n_part * k; c += MERGE_BLOCK)
-        kf_dev_insert(vals, idx, k, part_vals[base + c], part_idx[base + c]);
+    kf_clear(vals, idx, k);
+    for (int c = threadIdx.x; c < n_part * k; c += KF_MERGE_BLOCK)
+        kf_insert(vals, idx, k, part_vals[base + c], part_idx[base + c]);
 
     for (int r = 0; r < k; ++r) {
         sVals[threadIdx.x * k + r] = vals[r];
@@ -141,9 +119,9 @@ static __global__ void kf_v3_merge(const float *__restrict__ part_vals,
     if (threadIdx.x == 0) {
         float mv[KF_MAX_K];
         int   mi[KF_MAX_K];
-        for (int r = 0; r < k; ++r) { mv[r] = -FLT_MAX; mi[r] = -1; }
-        for (int t = 0; t < MERGE_BLOCK * k; ++t)
-            kf_dev_insert(mv, mi, k, sVals[t], sIdx[t]);
+        kf_clear(mv, mi, k);
+        for (int t = 0; t < KF_MERGE_BLOCK * k; ++t)
+            kf_insert(mv, mi, k, sVals[t], sIdx[t]);
         for (int r = 0; r < k; ++r) {
             out_vals[b * k + r] = mv[r];
             out_idx[b * k + r]  = mi[r];
@@ -160,7 +138,7 @@ extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
     cudaEvent_t ev0 = NULL, ev1 = NULL;
     double t_start = kf_now_ms(), t_h2d0, t_h2d1, t_d2h0, t_d2h1;
     float kernel_ms = 0.0f;
-    const int n_part = (N + CHUNK - 1) / CHUNK;
+    const int n_part = (N + KF_CHUNK - 1) / KF_CHUNK;
 
     if (k > KF_MAX_K || k < 1) return -1;
 
@@ -183,12 +161,12 @@ extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
         /* Shared memory: the query, then the chunk's scores, which are reused as
          * the per-thread candidate lists once scoring is done. */
         size_t smem = (size_t)d * sizeof(float) +
-                      (size_t)V3_BLOCK * KF_MAX_K * (sizeof(float) + sizeof(int));
+                      (size_t)KF_V3_BLOCK * KF_MAX_K * (sizeof(float) + sizeof(int));
         dim3 grid(n_part, B);
         KF_CHECK(cudaEventRecord(ev0));
-        kf_v3_partial<<<grid, V3_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k);
+        kf_v3_partial<<<grid, KF_V3_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k);
         KF_CHECK(cudaGetLastError());
-        kf_v3_merge<<<B, MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+        kf_v3_merge<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
         KF_CHECK(cudaEventRecord(ev1));
         KF_CHECK(cudaGetLastError());
         KF_CHECK(cudaEventSynchronize(ev1));

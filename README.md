@@ -11,10 +11,19 @@ questions — including the ones about where the library wins.
 
 ## Status: `resume_eligible: no`
 
-**The kernels are written but have not yet been compiled or run on a GPU.**
-There is no GPU on the development machine, so nothing in this repo has produced
-a measured result. `bench/RESULTS.md` contains no numbers, and CUDA is not on
-the resume and is not checked off on any application.
+**The kernels compile but have never been executed.** CI builds all five with
+`nvcc` for `sm_75`, and 30 tests pass on CPU — but every test that would run a
+kernel is skipped, because there is no GPU on the development machine. Nothing
+here has produced a measured result. `bench/RESULTS.md` contains no numbers,
+CUDA is not on the resume, and it is not checked off on any application.
+
+What *is* established without a GPU: the NumPy reference is right, the
+`(score, index)` comparison rule is right, and v3's two-stage selection produces
+the reference answer under adversarial inputs — heavy ties, chunk boundaries,
+winners hidden in the tail — because `src/selection_sim.cpp` runs that exact
+decomposition on the host. See
+[`docs/how-it-works.md`](docs/how-it-works.md#what-is-verified-and-where) for
+what that does and does not prove.
 
 What flips this to `resume_eligible: yes`:
 
@@ -42,6 +51,13 @@ chunk count — and scales to 1M synthetic rows.
 | 2 | [`src/v2_warp.cu`](src/v2_warp.cu) | One warp per document; coalesced global reads reduced with `__shfl_down_sync`. | That the shared-memory round trip in v1 was avoidable. |
 | 3 | [`src/v3_topk.cu`](src/v3_topk.cu) | v2 scoring plus per-block partial top-k and a merge kernel. | End-to-end latency once the `B x N` PCIe copy is gone. |
 | — | [`src/cublas_ref.cu`](src/cublas_ref.cu) | `cublasSgemm` + host top-k, same ABI and timing points. | The honest gap to a tuned library. |
+
+Every selection in the project — host fallback, both stages of v3, and the CPU
+simulation — goes through one comparison in
+[`src/topk_rule.h`](src/topk_rule.h): a candidate wins on a higher score, or on
+an equal score with a lower document index. Ties never depend on which block
+finished first, which is what lets the tests compare *indices* and not just
+values.
 
 All five sit behind one C ABI ([`src/kernelforge.h`](src/kernelforge.h)) and are
 driven from Python through ctypes ([`src/runner.py`](src/runner.py)), so the
@@ -79,6 +95,16 @@ The test sizes deliberately include the awkward ones: `N = 2039` (not a multiple
 of any tile), `N = 1` (less than one warp of work), and `N = 1024` (exactly one
 v3 chunk, so the tail path is empty).
 
+v3 is the only version whose answer depends on how work is split across blocks,
+so it gets a second line of defence that needs no GPU:
+[`src/selection_sim.cpp`](src/selection_sim.cpp) runs its exact decomposition
+serially in plain C++ — same chunk size, same strides, same merge, sharing
+[`src/v3_config.h`](src/v3_config.h) and the rule above so it cannot drift from
+the kernel. [`tests/test_selection.py`](tests/test_selection.py) then attacks it
+with all-identical scores, ties quantized across six chunks, winners buried in
+the short tail chunk, and winners planted one per chunk so the merge has to read
+every partial list. Build it with `make sim`; the tests compile it on demand.
+
 ## Benchmark discipline
 
 Same GPU, same `d`, sweep `N` and `B`, warm up, at least 15 repeats, report
@@ -102,10 +128,12 @@ quality.
 ## Layout
 
 ```
-src/         kernelforge.h, common.cuh, v0-v3 + cublas_ref, reference.py, runner.py
+src/         kernelforge.h, common.cuh, topk_rule.h, v3_config.h,
+             v0-v3 + cublas_ref, selection_sim.cpp, reference.py, runner.py
+docs/        how-it-works.md - the optimization story and what is verified where
 bench/       run.py (sweep) and RESULTS.md (interpretation)
 colab/       KernelForge_T4.ipynb - the whole run on a Colab T4
-tests/       test_correctness.py
+tests/       test_correctness.py (kernels vs reference), test_selection.py (v3 logic, no GPU)
 Makefile     nvcc build, `make test`, `make bench`, `make profile`
 ```
 

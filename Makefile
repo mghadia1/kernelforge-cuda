@@ -1,7 +1,7 @@
 # KernelForge build. One shared library holds every version so the benchmark can
 # switch between them by symbol name through ctypes.
 #
-#   make            build build/libkernelforge.so
+#   make            build the CUDA library and the host-side selection simulation
 #   make test       build (if nvcc exists) and run pytest
 #   make bench      run the sweep into bench/results.csv
 #   make ARCH=sm_80 build for a different GPU (default targets the T4)
@@ -14,13 +14,16 @@ ARCH    ?= sm_75
 PYTHON  ?= python3
 BUILD   := build
 LIB     := $(BUILD)/libkernelforge.so
+SIM     := $(BUILD)/libkfsim.so
 SRC     := src/v0_naive.cu src/v1_shared.cu src/v2_warp.cu src/v3_topk.cu src/cublas_ref.cu
 NVCCFLAGS := -O3 -std=c++14 -arch=$(ARCH) -Xcompiler -fPIC -lineinfo -Isrc
 LDLIBS    := -lcublas
 
-.PHONY: all test bench clean profile
+CXX     ?= c++
 
-all: $(LIB)
+.PHONY: all sim test bench clean profile
+
+all: $(LIB) $(SIM)
 
 $(LIB): $(SRC) src/kernelforge.h src/common.cuh
 	@mkdir -p $(BUILD)
@@ -29,9 +32,18 @@ $(LIB): $(SRC) src/kernelforge.h src/common.cuh
 # -lineinfo above keeps source line numbers in the cubin so Nsight Compute can
 # attribute stalls to lines; it does not affect optimization.
 
-test:
+# v3's selection logic, compiled for the host so it can be tested with no GPU.
+# No CUDA involved: see the header comment in src/selection_sim.cpp for what
+# this does and does not prove.
+sim: $(SIM)
+
+$(SIM): src/selection_sim.cpp src/topk_rule.h src/v3_config.h
+	@mkdir -p $(BUILD)
+	$(CXX) -O2 -std=c++17 -shared -fPIC -Isrc src/selection_sim.cpp -o $@
+
+test: $(SIM)
 	@command -v $(NVCC) >/dev/null 2>&1 && $(MAKE) $(LIB) || \
-		echo "nvcc not found - running CPU-only reference tests, GPU tests will skip"
+		echo "nvcc not found - running CPU-only tests; the GPU tests will skip"
 	$(PYTHON) -m pytest
 
 bench: $(LIB)
