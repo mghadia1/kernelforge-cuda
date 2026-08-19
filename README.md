@@ -40,13 +40,19 @@ Three findings worth more than the speedup:
   0.601 ms vs v3 2.030 ms. The kernel pays off from ~10^5 documents, or with
   batched queries.
 
-Four of five conditions are now met: it builds, it passes with 0 skips, the
-benchmark is recorded, and the Nsight capture is interpreted — including the
-part it failed to establish (the roofline claim is explicitly still open, and
-occupancy came back at 3.80%, which exposed a real serialization in the merge
-kernel). The fifth is Mayank's: explaining one design choice and one failure
-mode unaided. **Until that closes, CUDA stays off the resume and unchecked on
-applications.**
+A targeted `ncu --kernel-name kf_v3_partial --set full` settled the roofline
+question: **DRAM throughput 68.79% of peak against 36.83% SM throughput**, 4% of
+fp32 peak, 218.77 GB/s of the T4's 320 GB/s. The scoring kernel is memory-bound,
+as predicted — and that also explains the cuBLAS gap. Near the bandwidth
+ceiling the only way to go faster is to move fewer bytes, and this kernel reads
+the whole corpus once *per query* (4.9 GB to answer 32 queries at N = 100,000).
+cuBLAS tiles both dimensions and moves roughly B times less. That is the next
+optimization, and it now has a measurement behind it rather than a guess.
+
+Four of five conditions are met: it builds, it passes with 0 skips, the
+benchmark is recorded, and the profile is captured and interpreted. The fifth is
+Mayank's — explaining one design choice and one failure mode unaided. **Until
+that closes, CUDA stays off the resume and unchecked on applications.**
 
 ## The problem
 

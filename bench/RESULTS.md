@@ -161,41 +161,75 @@ So the defensible claim is not "I made retrieval faster." It is: *on the corpus
 PaperTrail actually has, this kernel is slower than NumPy unless queries are
 batched; it pays off from about 10^5 documents.*
 
-## Nsight Compute (v3, N = 100,000, B = 32)
+## Nsight Compute
+
+Two captures, and the first one misled. `ncu --set basic` profiles whichever
+kernel it reaches first and reported 3.80% achieved occupancy against 100%
+theoretical — numbers that match neither of v3's kernels' shared-memory budget.
+The targeted capture below reports 75% theoretical for `kf_v3_partial`, so the
+basic run had profiled the *other* kernel, `kf_v3_merge`, which launches only
+B = 32 blocks across the T4's 40 SMs. Its load-imbalance warning ("minimum
+instance value is 100.00% below the average") is exactly that: idle SMs.
+
+Lesson recorded: an `ncu` number is meaningless without the kernel name attached
+to it.
+
+### `kf_v3_partial` — the scoring kernel
+
+`ncu --kernel-name kf_v3_partial --set full`, grid (98, 32, 1), block (256, 1, 1),
+31 passes:
 
 | Metric | Value |
-|---|---|
-| Achieved occupancy | 3.80% |
-| Achieved active warps per SM | 1.21 |
-| Theoretical occupancy | 100.0% |
+|---|---:|
+| **DRAM throughput** | **68.79% of peak** |
+| Memory throughput | 218.77 GB/s |
+| **Compute (SM) throughput** | **36.83%** |
+| fp32 peak achieved | 4% |
+| L1/TEX cache throughput | 37.44% |
+| L2 cache throughput | 22.25% |
+| Theoretical occupancy | 75% |
+| Achieved occupancy | 47.88% |
+| Executed IPC | 0.78 |
+| SM busy | 19.90% |
+| Duration | 26.46 ms |
 
-`ncu --set basic` also flagged load imbalance: at least one SM had 100% fewer
-active cycles than the average, with an estimated 16.6% speedup available.
+**The prediction holds.** The scoring kernel is memory-bound: DRAM throughput is
+roughly double the SM throughput, arithmetic reaches 4% of the T4's fp32 peak,
+and Nsight's own verdict is "Memory is more heavily utilized than Compute." At
+218.77 GB/s against the T4's 320 GB/s the kernel is running at about 69% of the
+bandwidth ceiling, which is where a 0.5 FLOP/byte problem belongs.
 
-3.8% achieved against 100% theoretical is a large finding and points at
-`kf_v3_merge`, whose final stage folds 256 partial lists **in thread 0 alone**
-while the other 255 threads idle. That is a real design weakness, and it is a
-serialization the code was written to accept for simplicity.
+### Why that also explains the cuBLAS gap
 
-**The roofline prediction is still unconfirmed.** The captured section reports
-4,022 average DRAM active cycles against 10.7M elapsed, which is consistent with
-having profiled the small merge kernel rather than `kf_v3_partial`, and the
-output was truncated before the memory-throughput section. Whether the scoring
-kernel is bandwidth-bound at the predicted ~0.5 FLOP/byte is **not established
-by this run**. Closing it needs a targeted capture:
+Being near the bandwidth ceiling means the only way left to go faster is to
+**move fewer bytes** — and this kernel moves far more than it needs to. One
+block owns one (query, chunk) pair, so every query re-reads the whole corpus:
+at N = 100,000 that is 153.6 MB of X read **32 times**, about 4.9 GB, to answer
+32 queries.
 
-```bash
-ncu --kernel-name kf_v3_partial --set full python bench/run.py --profile-once --n 100000 --b 32
-```
+cuBLAS does not win by being faster per byte. It wins by tiling over *both*
+dimensions, holding a tile of X in shared memory and reusing it across many
+queries, so it moves roughly B times less data. That is a specific, checkable
+explanation for the 1.22x gap, and it is the next optimization: tile the batch
+dimension so each X tile is loaded once and scored against several queries.
+
+75% theoretical occupancy is the shared-memory reservation (the query vector
+plus KF_MAX_K-wide candidate lists per thread); 47.88% achieved against it is
+the tail effect of chunks that finish early. Neither is the binding constraint
+while DRAM sits at 69%.
 
 ## What to do next, in order
 
-1. Targeted `ncu` on `kf_v3_partial` for the roofline claim above.
-2. A persistent-corpus benchmark: upload X once, time only query calls. This is
-   both the realistic case and the one where the kernel differences stop hiding
+1. **Tile the batch dimension.** The profile says the kernel is bandwidth-bound
+   while re-reading X once per query. Loading each X tile once and scoring it
+   against several queries is the change with a measured argument behind it,
+   and it is what cuBLAS is doing differently.
+2. A persistent-corpus benchmark: upload X once, time only the query calls.
+   Both the realistic case and the one where kernel differences stop hiding
    behind 325 ms of PCIe.
-3. Parallelize the final merge in `kf_v3_merge` instead of serializing it in
-   thread 0 — the occupancy number says what that is worth.
+3. Parallelize the final fold in `kf_v3_merge` instead of serializing it in
+   thread 0 — worth little in total time, but it is a real design weakness and
+   the 32-block launch leaves most of the GPU idle.
 
 ## Limits
 
