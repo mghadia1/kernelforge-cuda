@@ -104,6 +104,8 @@ At N = 1,000,000, B = 32:
 | v3 on-GPU top-k | 575.5 | 1.11x |
 | **v4 batch tiling** | **407.0** | **1.41x** |
 | **v4 vs v0** | | **2.77x** |
+| | | |
+| Best speedup over the NumPy CPU baseline | | **12.8x** (v4, N = 100,000, B = 32) |
 | cuBLAS + host top-k | 505.7 | v4 is 1.24x faster |
 | torch matmul + topk | 340.4 | v4 is 1.20x slower |
 
@@ -190,9 +192,18 @@ single rows should not be over-read.
 ## Where the GPU still loses
 
 At PaperTrail's actual corpus size — N = 2,039, one query at a time — NumPy is
-still fastest at 0.601 ms. Batch tiling does nothing for B = 1 by construction:
-with one query there is nothing to reuse an X byte against, which is exactly
-why v4 and v3 tie at B = 1 across every N.
+still fastest: **0.650 ms against v4's 1.669 ms**.
+
+Batch tiling cannot help *through reuse* at B = 1, because with one query there
+is nothing to reuse a loaded byte against. The B = 1 column bears that out where
+bandwidth is the constraint: v3 and v4 land within 0.4% of each other at
+N = 100,000 and N = 1,000,000.
+
+It does not follow that v4 is pointless at B = 1. It is still ahead at the two
+small sizes — 1.17x at N = 2,039 and 1.09x at N = 10,000 — and that is *not* the
+tiling. It is v4's smaller 256-document chunk and its warp-level selection,
+which matter when the call is dominated by launch overhead and selection rather
+than by memory traffic. Attributing those wins to batch tiling would be wrong.
 
 ## What to do next, in order
 

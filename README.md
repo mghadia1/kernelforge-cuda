@@ -22,8 +22,9 @@ N = 1,000,000, B = 32, end-to-end median:
 |---:|---:|---:|---:|---:|---:|---:|
 | 1127.4 | 745.0 | 639.2 | 575.5 | **407.0 ms** | 505.7 | 340.4 |
 
-v4 is **2.77x** faster than the naive kernel end-to-end, and its **kernel alone
-is 5.19x faster than v3's** (206.25 → 39.75 ms) — the end-to-end figure is
+v4 is **2.77x** faster than the naive kernel end-to-end, **12.8x** faster than
+the NumPy CPU baseline at its best point (N = 100,000, B = 32), and its **kernel
+alone is 5.19x faster than v3's** (206.25 → 39.75 ms) — the end-to-end figure is
 diluted because a 1.54 GB corpus upload dominates every call.
 
 **Each step was chosen by a measurement, not a guess.** The Nsight profile of
@@ -53,8 +54,11 @@ Honest qualifiers, stated up front:
   `topk`) v4 still loses, 407.0 vs 340.4 ms. The claim is "beats a cuBLAS +
   host-top-k pipeline and comes within 1.2x of PyTorch", not "beats cuBLAS".
 - **At PaperTrail's real size the GPU still loses**: N = 2,039 with one query,
-  NumPy 0.601 ms vs v4 ~2 ms. Batch tiling cannot help at B = 1 — with one
-  query there is nothing to reuse a loaded byte against.
+  NumPy 0.650 ms vs v4 1.669 ms. Batch tiling cannot help *through reuse* at
+  B = 1 — with one query there is nothing to reuse a loaded byte against, and
+  v3 and v4 land within 0.4% of each other at the two large sizes. (v4 is still
+  1.17x ahead at N = 2,039, but that is its smaller chunk and cheaper
+  selection, not the tiling.)
 - Two earlier predictions in this repo were wrong and are corrected in
   RESULTS.md rather than deleted.
 
