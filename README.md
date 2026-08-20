@@ -11,59 +11,54 @@ questions — including the ones about where the library wins.
 
 ## Status: `resume_eligible: no` — one gate left
 
-**Ran on a Colab Tesla T4, August 19, 2026.** All tests pass with **0 skipped**,
-worst absolute error 2.533e-07, every implementation returning indices identical
-to the NumPy reference. `bench/results.csv` holds 93 measured rows;
+**Ran on a Colab Tesla T4.** 101 tests pass with **0 skipped**, worst absolute
+error 2.533e-07, every implementation returning indices identical to the NumPy
+reference. `bench/results.csv` holds 105 measured rows;
 [`bench/RESULTS.md`](bench/RESULTS.md) interprets them.
 
 N = 1,000,000, B = 32, end-to-end median:
 
-| v0 naive | v1 shared | v2 warp | v3 top-k | **v4 batch** | cuBLAS+host top-k | torch |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1127.4 | 745.0 | 639.2 | 575.5 | **407.0 ms** | 505.7 | 340.4 |
+| v0 | v1 | v2 | v3 | v4 | **v5** | cuBLAS+host top-k | torch |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1103.6 | 723.4 | 650.7 | 567.6 | 403.3 | **389.3 ms** | 469.5 | 348.0 |
 
-v4 is **2.77x** faster than the naive kernel end-to-end, **12.8x** faster than
-the NumPy CPU baseline at its best point (N = 100,000, B = 32), and its **kernel
-alone is 5.19x faster than v3's** (206.25 → 39.75 ms) — the end-to-end figure is
-diluted because a 1.54 GB corpus upload dominates every call.
+2.84x over the naive kernel, 12.6x over the NumPy CPU baseline at its best point.
 
-**Each step was chosen by a measurement, not a guess.** The Nsight profile of
-v3's scoring kernel showed 68.79% DRAM throughput against 36.83% SM throughput:
-bandwidth-bound, so the only lever left was moving fewer bytes. v3 re-read the
-whole corpus once per query. v4 gives each block a tile of eight queries and
-reuses every loaded X element across all eight. The follow-up profile confirms
-the mechanism and shows the bottleneck **moving**:
+**Every step was chosen by the previous step's profile**, and the scoring kernel
+tells that story better than the wall-clock does (`ncu`, N = 100,000, B = 32):
 
-| | kf_v3_partial | kf_v4_partial |
-|---|---:|---:|
-| Duration | 26.46 ms | 7.40 ms |
-| DRAM throughput | 68.79% | 39.27% |
-| Compute (SM) throughput | 36.83% | 74.18% |
-| L1/TEX throughput | 37.44% | **78.48%** |
-| fp32 peak | 4% | 13% |
-| Achieved occupancy | 47.88% | 74.32% |
+| | kf_v3_partial | kf_v4_partial | kf_v5_partial |
+|---|---:|---:|---:|
+| Duration | 26.46 ms | 7.40 ms | **3.88 ms** |
+| DRAM throughput | **68.79%** | 39.27% | **74.54%** |
+| Compute (SM) | 36.83% | 74.18% | 77.88% |
+| L1/TEX | 37.44% | **78.48%** | **85.93%** |
+| fp32 peak | 4% | 13% | **26%** |
 
-It runs 3.58x faster while pulling *less* bandwidth — not moving data faster,
-moving less of it. The limiter is now shared-memory reads of the query tile,
-which names the next step (register-blocking) without guesswork.
+v3 was DRAM-bound while moving 8x more data than necessary. v4 tiled the batch
+so each X byte serves eight queries — 3.58x faster on *less* bandwidth, which
+pushed the limiter to shared-memory reads of the query tile (L1/TEX 78.48%). v5
+register-blocked exactly that: 1.91x faster again, arithmetic doubled to 26% of
+peak, and DRAM back to 74.54% — the same bytes arriving in half the time. The
+kernel is now bandwidth-bound at ~74% of the T4's 320 GB/s, which is where a
+0.5 FLOP/byte problem belongs.
 
 Honest qualifiers, stated up front:
 
-- **cuBLAS's GEMM is 2.97x faster than v4's kernel** — 12.94 ms against
-  38.45 ms at N = 1M, B = 32. v4 wins the end-to-end row only because that
-  baseline then spends 9.76 ms copying scores back and 83.79 ms selecting on the
-  CPU. The honest claim is "beats a cuBLAS GEMM + **host-side** top-k pipeline
-  by keeping selection on the device, while losing to cuBLAS's GEMM itself by
-  about 3x" — not "beats cuBLAS". PyTorch is that better GEMM paired with a
-  device-side `topk`, which is why it still wins at 340.4 ms.
+- **cuBLAS's GEMM is still 2.34x faster than v5's kernel** — 12.94 ms against
+  29.78 ms at N = 1M, B = 32 (it was 2.97x before register blocking). v5 wins
+  the end-to-end row only because that baseline then spends 9.76 ms copying
+  scores back and 83.79 ms selecting on the CPU. The claim is "beats a cuBLAS
+  GEMM + **host-side** top-k pipeline", never "beats cuBLAS". PyTorch — the same
+  fast GEMM with a device-side `topk` — still wins at 348.0 ms.
+- **v5 barely moves the end-to-end number** (1.04x over v4) because a 1.54 GB
+  corpus upload dominates every call. A 1.91x kernel gain worth almost nothing
+  to the caller is the honest result, and it makes the persistent-corpus
+  benchmark the only remaining lever.
 - **At PaperTrail's real size the GPU still loses**: N = 2,039 with one query,
-  NumPy 0.650 ms vs v4 1.669 ms. Batch tiling cannot help *through reuse* at
-  B = 1 — with one query there is nothing to reuse a loaded byte against, and
-  v3 and v4 land within 0.4% of each other at the two large sizes. (v4 is still
-  1.17x ahead at N = 2,039, but that is its smaller chunk and cheaper
-  selection, not the tiling.)
-- Two earlier predictions in this repo were wrong and are corrected in
-  RESULTS.md rather than deleted.
+  NumPy is fastest.
+- Two predictions this repo made before the first run were wrong and are
+  corrected in RESULTS.md rather than deleted.
 
 Four of five conditions are met: it builds, it passes with 0 skips, the
 benchmark is recorded, and the profiles are captured and interpreted. The fifth
@@ -86,6 +81,7 @@ chunk count — and scales to 1M synthetic rows.
 | 2 | [`src/v2_warp.cu`](src/v2_warp.cu) | One warp per document; coalesced global reads reduced with `__shfl_down_sync`. | That the shared-memory round trip in v1 was avoidable. |
 | 3 | [`src/v3_topk.cu`](src/v3_topk.cu) | v2 scoring plus per-block partial top-k and a merge kernel. | End-to-end latency once the `B x N` PCIe copy is gone. |
 | 4 | [`src/v4_batch.cu`](src/v4_batch.cu) | Tile the batch: each block scores a chunk against 8 queries, so every X element loaded is reused 8 times. Selection becomes a warp-per-query masked max-reduction with no shared scratch. | Whether cutting DRAM traffic 8x moves the roofline. It does. |
+| 5 | [`src/v5_regblock.cu`](src/v5_regblock.cu) | Register-block it: a warp holds 4 documents and the 8 query values in registers, so shared-memory traffic per FMA falls 4x. | Whether the L1 pressure v4 created is the real limiter. It is — 1.91x. |
 | — | [`src/cublas_ref.cu`](src/cublas_ref.cu) | `cublasSgemm` + host top-k, same ABI and timing points. | The honest gap to a tuned library. |
 
 Every selection in the project — host fallback, both stages of v3, and the CPU
