@@ -1,9 +1,15 @@
 # Results
 
 Measured on a Google Colab **Tesla T4 (sm_75, 14.6 GB)**, driver 580.82.07,
-CUDA 12.8, on August 19, 2026. Every table is generated from
-`bench/results.csv` (93 rows), which the run wrote. Nothing here was typed by
-hand.
+CUDA 12.8, on August 19, 2026. Every table is generated from a CSV the run wrote — `bench/results.csv`
+(105 rows, cold calls) and `bench/results_persistent.csv` (69 rows, warm queries
+against a resident corpus). Nothing here was typed by hand.
+
+**Two cost models, both reported.** A *cold* call uploads the whole corpus and
+frees it; a *warm* query runs against a corpus already on the device. The cold
+number is what a one-shot script pays. The warm number is what a retrieval
+service pays, and it is the one that reflects the kernel work — see
+[the warm view](#the-warm-view-what-a-query-costs-once-the-corpus-is-resident).
 
 ## Setup
 
@@ -171,6 +177,94 @@ twelve (N, B) points, and 1.04x at the largest. The 1.54 GB upload dominates
 every call, so a kernel that got 1.91x faster is worth almost nothing to the
 caller. Both facts are true and the ladder table above reports the diluted one.
 
+## The warm view: what a query costs once the corpus is resident
+
+Everything above measures a **cold call** — allocate, upload the corpus, score,
+select, free. That is an honest number and a poor model of a retrieval service.
+At N = 1M the upload is ~350 ms and the scoring kernel is under 4 ms, so the
+cold column is mostly a PCIe measurement, which is why five versions of kernel
+work compressed into a 2.84x end-to-end line.
+
+`bench/persistent.py` uploads the corpus once (`kf_persistent.h`) and times only
+what a query costs after that: query vectors in, kernel, k results out. NumPy
+needs no special handling — its corpus was always resident, so `cpu_numpy` was
+measuring the warm case the whole time.
+
+### B = 1, warm query, median ms
+
+|       N |   cpu_numpy |   v3_topk |   v4_batch |   v5_regblock |   cublas |   torch_gpu |
+|--------:|------------:|----------:|-----------:|--------------:|---------:|------------:|
+|    2039 |       0.631 |     0.738 |      0.371 |         0.29  |    0.1   |       0.21  |
+|   10000 |       4.076 |     0.967 |      0.56  |         0.431 |    0.207 |       0.445 |
+|  100000 |      81.685 |     1.341 |      1.668 |         1.34  |    1.245 |       0.912 |
+| 1000000 |             |     9.852 |      8.905 |         7.734 |    9.152 |       6.449 |
+
+### B = 8, warm query, median ms
+
+|       N |   cpu_numpy |   v3_topk |   v4_batch |   v5_regblock |   cublas |   torch_gpu |
+|--------:|------------:|----------:|-----------:|--------------:|---------:|------------:|
+|    2039 |       2.54  |     0.802 |      0.646 |         0.409 |    0.216 |       0.27  |
+|   10000 |      27.558 |     2.125 |      0.789 |         0.506 |    0.658 |       0.502 |
+|  100000 |     224.763 |     7.546 |      1.964 |         1.253 |    3.922 |       1.614 |
+| 1000000 |             |    52.326 |     12.586 |         9.09  |   33.26  |      13.484 |
+
+### B = 32, warm query, median ms
+
+|       N |   cpu_numpy |   v3_topk |   v4_batch |   v5_regblock |   cublas |   torch_gpu |
+|--------:|------------:|----------:|-----------:|--------------:|---------:|------------:|
+|    2039 |       6.949 |     0.941 |      0.666 |         0.429 |    0.495 |       0.279 |
+|   10000 |      86.208 |     3.418 |      1.381 |         0.787 |    1.981 |       0.562 |
+|  100000 |     523.003 |    21.214 |      5.098 |         3.497 |    9.726 |       1.88  |
+| 1000000 |             |   205.212 |     49.661 |        37.975 |   98.013 |      17.975 |
+
+
+### The optimization work was real; the cold benchmark was hiding it
+
+| Comparison | cold | warm |
+|---|---:|---:|
+| v5 vs v3 (N = 1M, B = 32) | 1.46x | **5.40x** |
+| v5 vs v4 (N = 1M, B = 32) | 1.04x | **1.31x** |
+| v5 vs v4, best case | 1.13x | **1.76x** (N = 10k, B = 32) |
+| v5 vs cuBLAS + host top-k | 1.21x | **2.58x** |
+| v5 vs NumPy, best case | 12.6x | **179x** (N = 100k, B = 8) |
+
+Removing one memcpy from the measurement moved v5-over-v3 from 1.46x to 5.40x.
+The kernels never changed; the question did. Both numbers are in this file
+because both are true, and a reader deserves to know which question each answers.
+
+The same call, cold versus warm, for v5: **3.0x to 48.1x faster** once the
+corpus stays put — 48.1x at N = 1M, B = 1, where a single query was paying for
+1.54 GB of upload.
+
+### The finding that changes the project's conclusion
+
+The cold benchmark said: *at PaperTrail's actual size (N = 2,039, one query),
+NumPy wins and the GPU is not worth it.* That was recorded here as a headline
+limitation for several runs.
+
+**With the corpus resident it is false.** At N = 2,039, B = 1, v5 is 2.2x faster
+than NumPy, and the advantage grows with batch (16.2x at B = 32) and with corpus
+size (61x at N = 100k, B = 1). The earlier conclusion was an artifact of
+re-uploading 3 MB of embeddings on every query — something no retrieval system
+does.
+
+The honest statement is now: *for the way retrieval actually runs — corpus
+uploaded once, queried many times — the GPU path wins at every size measured,
+including PaperTrail's.*
+
+### Where it still loses, warm
+
+- **PyTorch wins at B = 32**: 17.975 ms against v5's 37.975 at N = 1M, and
+  1.880 against 3.497 at N = 100k. v5 wins at B = 8 (9.090 vs 13.484 at N = 1M,
+  a 1.48x lead) and at N = 10k, B = 1. The pattern is consistent with cuBLAS's
+  GEMM pulling further ahead as the batch grows, which is exactly the regime a
+  tuned GEMM is tiled for.
+- **cuBLAS + host top-k wins at small N with tiny batches** (0.34x at N = 2,039,
+  B = 1) — at that size the whole thing is launch overhead and its single GEMM
+  beats two kernels plus a merge.
+- v5 beats the cuBLAS row at 8 of the 12 points, by up to 3.66x, and the reason
+  is unchanged: it keeps selection on the device.
+
 ## About the cuBLAS comparison — measured, and it is not flattering
 
 v5 is faster than the `cublas` row at **eleven of the twelve** (N, B) points,
@@ -213,32 +307,28 @@ register blocking and a tuned tile shape per problem size; v4 tiles eight
 queries and reads them from shared memory every step, which is exactly what its
 78.48% L1/TEX throughput reports.
 
-## Where the GPU still loses
+## Where the GPU still loses (cold path only)
 
-At PaperTrail's actual corpus size — N = 2,039, one query at a time — NumPy is
-still fastest: **0.650 ms against v4's 1.669 ms**.
+At PaperTrail's corpus size, N = 2,039 with one query per call, the **cold**
+path loses to NumPy: 0.650 ms against v5's ~1.6 ms. Every GPU row below roughly
+N = 100,000 at B = 1 loses the same way, because a kernel launch plus two
+transfers costs more than the arithmetic saved.
 
-Batch tiling cannot help *through reuse* at B = 1, because with one query there
-is nothing to reuse a loaded byte against. The B = 1 column bears that out where
-bandwidth is the constraint: v3 and v4 land within 0.4% of each other at
-N = 100,000 and N = 1,000,000.
-
-It does not follow that v4 is pointless at B = 1. It is still ahead at the two
-small sizes — 1.17x at N = 2,039 and 1.09x at N = 10,000 — and that is *not* the
-tiling. It is v4's smaller 256-document chunk and its warp-level selection,
-which matter when the call is dominated by launch overhead and selection rather
-than by memory traffic. Attributing those wins to batch tiling would be wrong.
+This is a statement about the cold cost model, and the warm section above shows
+it does not survive a resident corpus. Kept here because the cold number is
+still what a one-shot script would experience.
 
 ## What to do next, in order
 
-1. **A persistent-corpus benchmark.** This is now the only change that can move
-   the end-to-end number. The scoring kernel is 3.88 ms while the upload is
-   ~350 ms; a real system uploads once and queries thousands of times, and until
-   the benchmark reflects that, every further kernel gain is invisible.
-2. Close the remaining 2.34x to cuBLAS's GEMM — a tuned tile shape per problem
-   size, and wider register tiles than 4x8.
-3. Parallelize the final fold in `kf_merge_partials`, still serialized in
-   thread 0.
+1. **Find out why PyTorch pulls ahead as the batch grows** — v5 leads at B = 8
+   and loses by 2.1x at B = 32. That is the clearest remaining signal, and it
+   points at the tile shape: 4 documents x 8 queries was the first shape that fit
+   the register budget, never a swept optimum.
+2. Parallelize the final fold in `kf_merge_partials`, still serialized in
+   thread 0. With the transfer gone, the merge is now a visible share of a
+   warm query.
+3. Multi-stream: overlap the query upload with scoring. Small, but at B = 1 the
+   48 KB copy and the launch are most of the call.
 
 ## Limits
 

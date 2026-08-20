@@ -16,13 +16,25 @@ error 2.533e-07, every implementation returning indices identical to the NumPy
 reference. `bench/results.csv` holds 105 measured rows;
 [`bench/RESULTS.md`](bench/RESULTS.md) interprets them.
 
-N = 1,000,000, B = 32, end-to-end median:
+This project measures **two cost models**, because they answer different
+questions and only one of them reflects the kernel work:
 
-| v0 | v1 | v2 | v3 | v4 | **v5** | cuBLAS+host top-k | torch |
+**Cold call** — upload the whole corpus, score, select, free (N = 1M, B = 32):
+
+| v0 | v1 | v2 | v3 | v4 | v5 | cuBLAS+host top-k | torch |
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 1103.6 | 723.4 | 650.7 | 567.6 | 403.3 | **389.3 ms** | 469.5 | 348.0 |
 
-2.84x over the naive kernel, 12.6x over the NumPy CPU baseline at its best point.
+**Warm query** — corpus already resident, which is how retrieval actually runs:
+
+| cpu_numpy | v3 | v4 | v5 | cuBLAS+host top-k | torch |
+|---:|---:|---:|---:|---:|---:|
+| — | 205.2 | 49.7 | **38.0 ms** | 98.0 | 18.0 |
+
+The cold column is mostly a PCIe measurement: a ~350 ms upload against a
+sub-4 ms kernel. Removing it from the question moves **v5-over-v3 from 1.46x to
+5.40x** and v5 over the cuBLAS row from 1.21x to **2.58x**. Against the NumPy
+CPU baseline a warm query is up to **179x** faster.
 
 **Every step was chosen by the previous step's profile**, and the scoring kernel
 tells that story better than the wall-clock does (`ncu`, N = 100,000, B = 32):
@@ -51,12 +63,17 @@ Honest qualifiers, stated up front:
   scores back and 83.79 ms selecting on the CPU. The claim is "beats a cuBLAS
   GEMM + **host-side** top-k pipeline", never "beats cuBLAS". PyTorch — the same
   fast GEMM with a device-side `topk` — still wins at 348.0 ms.
-- **v5 barely moves the end-to-end number** (1.04x over v4) because a 1.54 GB
-  corpus upload dominates every call. A 1.91x kernel gain worth almost nothing
-  to the caller is the honest result, and it makes the persistent-corpus
-  benchmark the only remaining lever.
-- **At PaperTrail's real size the GPU still loses**: N = 2,039 with one query,
-  NumPy is fastest.
+- **v5 barely moves the *cold* number** (1.04x over v4) because a 1.54 GB corpus
+  upload dominates that call. Warm, the same change is 1.31x-1.76x. Both are
+  reported; neither is hidden.
+- **A finding that reversed an earlier conclusion.** The cold benchmark said the
+  GPU was not worth it at PaperTrail's size (N = 2,039, one query) because NumPy
+  won. With the corpus resident that is false — v5 is 2.2x faster there, and
+  61x at N = 100k, B = 1. The old conclusion was an artifact of re-uploading
+  3 MB of embeddings per query, which no retrieval system does.
+- **PyTorch still wins at large batches**: 18.0 ms against v5's 38.0 at N = 1M,
+  B = 32. v5 wins at B = 8 (9.1 vs 13.5). The crossover is the honest headline,
+  not a single number.
 - Two predictions this repo made before the first run were wrong and are
   corrected in RESULTS.md rather than deleted.
 
