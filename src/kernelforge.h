@@ -42,6 +42,12 @@ int kf_v3_topk  (const float *q, const float *X, int B, int N, int d, int k,
 int kf_v4_batch  (const float *q, const float *X, int B, int N, int d, int k,
                  float *out_vals, int *out_idx, KfTiming *timing);
 
+/* Register-blocked: same batch tile as v4, but each warp holds V5_DR documents
+ * and the query values in registers, so shared-memory traffic per FMA drops by
+ * V5_DR. Written in response to a measured 78.48% L1/TEX throughput on v4. */
+int kf_v5_regblock(const float *q, const float *X, int B, int N, int d, int k,
+                 float *out_vals, int *out_idx, KfTiming *timing);
+
 /* Library baseline: cublasSgemm scoring + host top-k, same ABI and same timing
  * points, so the comparison in bench/RESULTS.md is like for like. */
 int kf_cublas   (const float *q, const float *X, int B, int N, int d, int k,

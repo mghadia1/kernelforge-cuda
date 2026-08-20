@@ -30,6 +30,17 @@ KF_CHUNK = 1024   # must match src/v3_config.h
 V4_CHUNK = 256    # must match src/v4_config.h
 KF_MAX_K = 8
 
+
+def _config(header: str, name: str) -> int:
+    """Read a #define out of a config header, so the tests cannot silently
+    drift from the constants the kernels actually compile with."""
+    import pathlib as _p
+    import re as _re
+    text = (_p.Path(__file__).resolve().parent.parent / "src" / header).read_text()
+    m = _re.search(rf"#define\s+{name}\s+(\d+)", text)
+    assert m, f"{name} not found in {header}"
+    return int(m.group(1))
+
 # Both selections are exercised by every pipeline test below. v4's is the newer
 # and stranger one: one warp per query, k rounds of a masked lexicographic
 # max-reduction over lane registers, no shared scratch. Its distinctive failure
@@ -174,3 +185,23 @@ def test_heavy_ties_inside_one_v4_chunk(version):
     rng = np.random.default_rng(5)
     scores = (rng.integers(0, 3, size=(3, 3 * V4_CHUNK)) / 4.0).astype(np.float32)
     check(scores, k=8, version=version)
+
+
+# --- v5 rides on v4's selection ---------------------------------------------
+
+def test_v5_selection_geometry_matches_v4():
+    """v5 changes only the scoring loop; it calls the same kf_warp_select over
+    the same chunk. That is what lets the v4 simulation above stand as coverage
+    for v5's selection as well. If someone retunes V5_CHUNK, this fails loudly
+    rather than leaving a coverage claim quietly false."""
+    assert _config("v5_config.h", "V5_CHUNK") == _config("v4_config.h", "V4_CHUNK")
+    assert _config("v5_config.h", "V5_QT") == _config("v4_config.h", "V4_QT")
+    assert _config("v5_config.h", "V5_PER_LANE".replace("V5_PER_LANE", "V5_CHUNK")) // 32 == V4_CHUNK // 32
+
+
+def test_config_constants_match_the_test_file():
+    """The chunk sizes hardcoded at the top of this file are the ones the tests
+    reason about; keep them tied to the headers."""
+    assert _config("v3_config.h", "KF_CHUNK") == KF_CHUNK
+    assert _config("v4_config.h", "V4_CHUNK") == V4_CHUNK
+    assert _config("v3_config.h", "KF_MAX_K") == KF_MAX_K

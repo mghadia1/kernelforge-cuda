@@ -21,7 +21,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_LIB = REPO_ROOT / "build" / "libkernelforge.so"
 SIM_LIB = REPO_ROOT / "build" / "libkfsim.so"
 
-VERSIONS = ("v0_naive", "v1_shared", "v2_warp", "v3_topk", "v4_batch")
+VERSIONS = ("v0_naive", "v1_shared", "v2_warp", "v3_topk", "v4_batch",
+            "v5_regblock")
 BASELINES = ("cublas",)  # library reference, not a hand-written kernel
 ALL_IMPLS = VERSIONS + BASELINES
 

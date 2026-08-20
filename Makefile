@@ -16,7 +16,7 @@ BUILD   := build
 LIB     := $(BUILD)/libkernelforge.so
 SIM     := $(BUILD)/libkfsim.so
 SRC     := src/v0_naive.cu src/v1_shared.cu src/v2_warp.cu src/v3_topk.cu \
-           src/v4_batch.cu src/cublas_ref.cu
+           src/v4_batch.cu src/v5_regblock.cu src/cublas_ref.cu
 NVCCFLAGS := -O3 -std=c++14 -arch=$(ARCH) -Xcompiler -fPIC -lineinfo -Isrc
 LDLIBS    := -lcublas
 
@@ -27,7 +27,8 @@ CXX     ?= c++
 all: $(LIB) $(SIM)
 
 $(LIB): $(SRC) src/kernelforge.h src/common.cuh src/topk_rule.h \
-        src/v3_config.h src/v4_config.h src/merge_topk.cuh
+        src/v3_config.h src/v4_config.h src/v5_config.h \
+        src/merge_topk.cuh src/select_warp.cuh
 	@mkdir -p $(BUILD)
 	$(NVCC) $(NVCCFLAGS) --shared $(SRC) -o $@ $(LDLIBS)
 

@@ -21,16 +21,17 @@
  * a shared-memory scratch, which at eight queries per block would cost more
  * shared memory than the scoring tile itself. Instead each warp takes one query
  * and runs k rounds of a masked, lexicographic max-reduction over its lane
- * registers with __shfl_down_sync — no shared scratch at all. The stage-two
- * merge is kf_merge_partials, shared with v3.
+ * registers with __shfl_down_sync — no shared scratch at all (select_warp.cuh,
+ * shared with v5). The stage-two merge is kf_merge_partials, shared with v3.
  */
 #include "common.cuh"
 #include "v3_config.h"       /* KF_MAX_K, and the merge block size */
 #include "v4_config.h"
+#include "select_warp.cuh"
 #include "merge_topk.cuh"
 
 #define WARP 32
-#define FULL_MASK 0xffffffffu
+#define FULL_MASK KF_FULL_MASK
 
 static __global__ void kf_v4_partial(const float *__restrict__ q,
                                      const float *__restrict__ X,
@@ -79,48 +80,12 @@ static __global__ void kf_v4_partial(const float *__restrict__ q,
     }
     __syncthreads();
 
-    /* Selection: warp j owns query j. Each lane scans V4_PER_LANE scores; k rounds
-     * of a masked lexicographic max-reduction pull out the top k without touching
-     * shared memory. Every comparison is kf_outranks, so ties go to the lower
-     * document index exactly as in reference.py. */
+    /* Selection: warp j owns query j, k rounds of a masked lexicographic
+     * max-reduction over lane registers. Shared with v5 (select_warp.cuh). */
     if (warpId < nq) {
-        const int j = warpId;
-        unsigned used = 0u;
-
-        for (int r = 0; r < k; ++r) {
-            float bv = -FLT_MAX;
-            int   bi = -1, be = -1;
-
-            for (int e = 0; e < V4_PER_LANE; ++e) {
-                if (used & (1u << e)) continue;
-                const int w = e * WARP + lane;
-                const int n = base + w;
-                if (n >= N) continue;
-                const float s = sScore[(size_t)w * V4_QT + j];
-                if (kf_outranks(s, n, bv, bi)) { bv = s; bi = n; be = e; }
-            }
-
-            /* Keep this lane's own candidate: the reduction overwrites bv/bi. */
-            const int my_bi = bi, my_be = be;
-
-            #pragma unroll
-            for (int off = WARP / 2; off > 0; off >>= 1) {
-                const float ov = __shfl_down_sync(FULL_MASK, bv, off);
-                const int   oi = __shfl_down_sync(FULL_MASK, bi, off);
-                if (kf_outranks(ov, oi, bv, bi)) { bv = ov; bi = oi; }
-            }
-            const float wv = __shfl_sync(FULL_MASK, bv, 0);
-            const int   wi = __shfl_sync(FULL_MASK, bi, 0);
-
-            /* Document indices are unique, so exactly one lane matches. */
-            if (my_be >= 0 && my_bi == wi) used |= (1u << my_be);
-
-            if (lane == 0) {
-                const size_t out = ((size_t)(qt0 + j) * gridDim.x + blockIdx.x) * k + r;
-                part_vals[out] = (wi < 0) ? -FLT_MAX : wv;
-                part_idx[out]  = wi;
-            }
-        }
+        const size_t out = ((size_t)(qt0 + warpId) * gridDim.x + blockIdx.x) * k;
+        kf_warp_select(sScore, V4_QT, warpId, V4_PER_LANE, base, N, k, lane,
+                       part_vals + out, part_idx + out);
     }
 }
 
