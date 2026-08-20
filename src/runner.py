@@ -244,3 +244,94 @@ def sim_outranks(s: float, i: int, v: float, j: int) -> bool:
     if lib is None:
         raise RuntimeError(f"selection simulation unavailable: {sim_error()}")
     return bool(lib.kf_sim_insert_rule(s, i, v, j))
+
+
+# --- persistent corpus -------------------------------------------------------
+#
+# The kf_v* entry points above pay for uploading the whole corpus on every call,
+# which is the honest cost of a cold call and useless as a model of a running
+# service. Corpus keeps X on the device so a query pays only for the query
+# vectors in, the kernel, and k results out. See src/kf_persistent.h.
+
+PERSISTENT_IMPLS = {"v3_topk": 0, "v4_batch": 1, "v5_regblock": 2, "cublas": 3}
+
+
+def _bind_persistent(lib):
+    if getattr(lib, "_kf_persistent_bound", False):
+        return
+    lib.kf_corpus_create.argtypes = [
+        np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS"),
+        ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int),
+    ]
+    lib.kf_corpus_create.restype = ctypes.c_void_p
+    lib.kf_corpus_query.argtypes = [
+        ctypes.c_void_p, ctypes.c_int,
+        np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS"),
+        ctypes.c_int, ctypes.c_int,
+        np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS"),
+        np.ctypeslib.ndpointer(np.int32, flags="C_CONTIGUOUS"),
+        ctypes.POINTER(KfTiming),
+    ]
+    lib.kf_corpus_query.restype = ctypes.c_int
+    lib.kf_corpus_destroy.argtypes = [ctypes.c_void_p]
+    lib.kf_corpus_destroy.restype = None
+    lib._kf_persistent_bound = True
+
+
+class Corpus:
+    """A corpus resident on the device. Use as a context manager.
+
+        with runner.Corpus(X) as corpus:
+            vals, idx, timing = corpus.query(q, k=5, impl="v5_regblock")
+    """
+
+    def __init__(self, x: np.ndarray):
+        lib = load()
+        if lib is None:
+            raise RuntimeError(f"kernelforge library unavailable: {load_error()}")
+        _bind_persistent(lib)
+        self._lib = lib
+        x = np.ascontiguousarray(x, dtype=np.float32)
+        self.n, self.d = x.shape
+        status = ctypes.c_int(0)
+        handle = lib.kf_corpus_create(x, self.n, self.d, ctypes.byref(status))
+        if not handle:
+            raise RuntimeError(f"kf_corpus_create failed with CUDA error {status.value}")
+        self._handle = ctypes.c_void_p(handle)
+
+    def query(self, q: np.ndarray, k: int, impl: str = "v5_regblock"):
+        if impl not in PERSISTENT_IMPLS:
+            raise ValueError(f"unknown impl {impl!r}; expected one of {sorted(PERSISTENT_IMPLS)}")
+        if self._handle is None:
+            raise RuntimeError("corpus is closed")
+        q = np.ascontiguousarray(q, dtype=np.float32)
+        b, d = q.shape
+        if d != self.d:
+            raise ValueError(f"dimension mismatch: corpus d={self.d}, query d={d}")
+        vals = np.zeros((b, k), dtype=np.float32)
+        idx = np.zeros((b, k), dtype=np.int32)
+        timing = KfTiming()
+        rc = self._lib.kf_corpus_query(self._handle, PERSISTENT_IMPLS[impl], q, b, k,
+                                       vals, idx, ctypes.byref(timing))
+        if rc != 0:
+            raise RuntimeError(f"kf_corpus_query({impl}) failed with error {rc}")
+        return vals, idx, Timing(timing.h2d_ms, timing.kernel_ms, timing.d2h_ms,
+                                 timing.host_topk_ms, timing.total_ms)
+
+    def close(self):
+        if getattr(self, "_handle", None) is not None:
+            self._lib.kf_corpus_destroy(self._handle)
+            self._handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

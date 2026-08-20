@@ -89,6 +89,21 @@ static __global__ void kf_v4_partial(const float *__restrict__ q,
     }
 }
 
+/* Launch only: device pointers in, no allocation and no host transfers. Shared
+ * by the cold path above and the persistent-corpus path in persistent.cu, so
+ * the two cannot measure different code. */
+extern "C" int kf_launch_v4(const float *d_q, const float *d_X, int B, int N, int d,
+                          int k, float *d_pv, int *d_pi, float *d_ov, int *d_oi) {
+    const int n_part = (N + V4_CHUNK - 1) / V4_CHUNK;
+        const size_t smem = ((size_t)V4_QT * d + (size_t)V4_CHUNK * V4_QT) * sizeof(float);
+        dim3 grid(n_part, (B + V4_QT - 1) / V4_QT);
+    kf_v4_partial<<<grid, V4_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k, B);
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) return (int)e;
+    kf_merge_partials<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+    return (int)cudaGetLastError();
+}
+
 extern "C" int kf_v4_batch(const float *q, const float *X, int B, int N, int d,
                            int k, float *out_vals, int *out_idx,
                            KfTiming *timing) {
@@ -118,14 +133,10 @@ extern "C" int kf_v4_batch(const float *q, const float *X, int B, int N, int d,
     t_h2d1 = kf_now_ms();
 
     {
-        const size_t smem = ((size_t)V4_QT * d + (size_t)V4_CHUNK * V4_QT) * sizeof(float);
-        dim3 grid(n_part, (B + V4_QT - 1) / V4_QT);
         KF_CHECK(cudaEventRecord(ev0));
-        kf_v4_partial<<<grid, V4_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k, B);
-        KF_CHECK(cudaGetLastError());
-        kf_merge_partials<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+        status = kf_launch_v4(d_q, d_X, B, N, d, k, d_pv, d_pi, d_ov, d_oi);
+        if (status != 0) goto cleanup;
         KF_CHECK(cudaEventRecord(ev1));
-        KF_CHECK(cudaGetLastError());
         KF_CHECK(cudaEventSynchronize(ev1));
         KF_CHECK(cudaEventElapsedTime(&kernel_ms, ev0, ev1));
     }

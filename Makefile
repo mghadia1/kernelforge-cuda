@@ -3,7 +3,7 @@
 #
 #   make            build the CUDA library and the host-side selection simulation
 #   make test       build (if nvcc exists) and run pytest
-#   make bench      run the sweep into bench/results.csv
+#   make bench      cold sweep + warm (resident-corpus) sweep into bench/*.csv
 #   make ARCH=sm_80 build for a different GPU (default targets the T4)
 #
 # ARCH defaults to sm_75, the Turing arch of the Colab/Kaggle T4 this project is
@@ -16,7 +16,8 @@ BUILD   := build
 LIB     := $(BUILD)/libkernelforge.so
 SIM     := $(BUILD)/libkfsim.so
 SRC     := src/v0_naive.cu src/v1_shared.cu src/v2_warp.cu src/v3_topk.cu \
-           src/v4_batch.cu src/v5_regblock.cu src/cublas_ref.cu
+           src/v4_batch.cu src/v5_regblock.cu src/cublas_ref.cu \
+           src/persistent.cu
 NVCCFLAGS := -O3 -std=c++14 -arch=$(ARCH) -Xcompiler -fPIC -lineinfo -Isrc
 LDLIBS    := -lcublas
 
@@ -28,7 +29,7 @@ all: $(LIB) $(SIM)
 
 $(LIB): $(SRC) src/kernelforge.h src/common.cuh src/topk_rule.h \
         src/v3_config.h src/v4_config.h src/v5_config.h \
-        src/merge_topk.cuh src/select_warp.cuh
+        src/merge_topk.cuh src/select_warp.cuh src/kf_persistent.h
 	@mkdir -p $(BUILD)
 	$(NVCC) $(NVCCFLAGS) --shared $(SRC) -o $@ $(LDLIBS)
 
@@ -51,6 +52,7 @@ test: $(SIM)
 
 bench: $(LIB)
 	$(PYTHON) bench/run.py --out bench/results.csv
+	$(PYTHON) bench/persistent.py --out bench/results_persistent.csv
 
 # Nsight Compute on the best kernel. Needs a GPU with profiling permitted
 # (Colab allows the basic sections; add --set full off-Colab).

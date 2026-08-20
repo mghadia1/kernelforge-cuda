@@ -97,3 +97,69 @@ def test_unknown_version_is_rejected():
     q, x = reference.make_data(16, 1, seed=3)
     with pytest.raises(ValueError):
         runner.run("v9_imaginary", q, x, 5)
+
+
+# --- persistent corpus: same answers, different cost model ------------------
+
+PERSISTENT = ["v3_topk", "v4_batch", "v5_regblock", "cublas"]
+
+
+@gpu_required
+@pytest.mark.parametrize("impl", PERSISTENT)
+@pytest.mark.parametrize("n,b", SIZES)
+def test_persistent_matches_reference(impl, n, b):
+    """A resident corpus must not change the answer, only what the call costs."""
+    k = min(5, n)
+    q, x = reference.make_data(n, b, seed=n + b)
+    exp_vals, exp_idx = reference.reference_topk(q, x, k)
+    with runner.Corpus(x) as corpus:
+        got_vals, got_idx, timing = corpus.query(q, k, impl)
+    assert np.max(np.abs(got_vals - exp_vals)) < TOL
+    assert np.array_equal(got_idx, exp_idx)
+    assert timing.kernel_ms > 0.0
+
+
+@gpu_required
+def test_persistent_reuses_and_grows_its_scratch():
+    """Queries of different shapes against one corpus. The scratch buffers are
+    sized on first use and grown only when a later query needs more, so this
+    walks a small batch, then a larger one, then small again."""
+    n = 5000
+    _, x = reference.make_data(n, 1, seed=3)
+    with runner.Corpus(x) as corpus:
+        for b, k in ((1, 5), (16, 8), (4, 1), (16, 8)):
+            q = reference.l2_normalize(
+                np.random.default_rng(b * 10 + k).standard_normal((b, reference.DIM), dtype=np.float32))
+            exp_vals, exp_idx = reference.reference_topk(q, x, k)
+            vals, idx, _ = corpus.query(q, k, "v5_regblock")
+            assert np.array_equal(idx, exp_idx), f"B={b} k={k}"
+            assert np.max(np.abs(vals - exp_vals)) < TOL
+
+
+@gpu_required
+def test_persistent_query_pays_only_for_the_query_vectors():
+    """The whole point: h2d covers B*d floats, not N*d. At N = 200k, B = 8 the
+    corpus is 300 MB and the query batch is 12 KB, so the two transfers cannot
+    be within an order of magnitude of each other."""
+    n, b, k = 200_000, 8, 5
+    q, x = reference.make_data(n, b, seed=5)
+    cold_timing = runner.run("v5_regblock", q, x, k)[2]
+    with runner.Corpus(x) as corpus:
+        corpus.query(q, k, "v5_regblock")          # warm up the scratch
+        warm_timing = corpus.query(q, k, "v5_regblock")[2]
+    assert warm_timing.h2d_ms < cold_timing.h2d_ms / 10.0
+    assert warm_timing.total_ms < cold_timing.total_ms
+
+
+@gpu_required
+def test_persistent_rejects_bad_arguments():
+    q, x = reference.make_data(64, 2, seed=9)
+    with runner.Corpus(x) as corpus:
+        with pytest.raises(ValueError):
+            corpus.query(q, 5, "v9_imaginary")
+        with pytest.raises(ValueError):
+            corpus.query(np.zeros((2, 17), dtype=np.float32), 5, "v5_regblock")
+        with pytest.raises(RuntimeError):
+            corpus.query(q, 99, "v5_regblock")     # k above KF_MAX_K
+    with pytest.raises(RuntimeError):
+        corpus.query(q, 5, "v5_regblock")          # closed

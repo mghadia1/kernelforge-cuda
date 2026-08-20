@@ -93,6 +93,24 @@ static __global__ void kf_v3_partial(const float *__restrict__ q,
     }
 }
 
+/* Launch only: device pointers in, no allocation and no host transfers. Shared
+ * by the cold path above and the persistent-corpus path in persistent.cu, so
+ * the two cannot measure different code. */
+extern "C" int kf_launch_v3(const float *d_q, const float *d_X, int B, int N, int d,
+                          int k, float *d_pv, int *d_pi, float *d_ov, int *d_oi) {
+    const int n_part = (N + KF_CHUNK - 1) / KF_CHUNK;
+        /* Shared memory: the query, then the chunk's scores, which are reused as
+         * the per-thread candidate lists once scoring is done. */
+        size_t smem = (size_t)d * sizeof(float) +
+                      (size_t)KF_V3_BLOCK * KF_MAX_K * (sizeof(float) + sizeof(int));
+        dim3 grid(n_part, B);
+    kf_v3_partial<<<grid, KF_V3_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k);
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) return (int)e;
+    kf_merge_partials<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+    return (int)cudaGetLastError();
+}
+
 extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
                           int k, float *out_vals, int *out_idx,
                           KfTiming *timing) {
@@ -128,11 +146,9 @@ extern "C" int kf_v3_topk(const float *q, const float *X, int B, int N, int d,
                       (size_t)KF_V3_BLOCK * KF_MAX_K * (sizeof(float) + sizeof(int));
         dim3 grid(n_part, B);
         KF_CHECK(cudaEventRecord(ev0));
-        kf_v3_partial<<<grid, KF_V3_BLOCK, smem>>>(d_q, d_X, d_pv, d_pi, N, d, k);
-        KF_CHECK(cudaGetLastError());
-        kf_merge_partials<<<B, KF_MERGE_BLOCK>>>(d_pv, d_pi, d_ov, d_oi, n_part, k);
+        status = kf_launch_v3(d_q, d_X, B, N, d, k, d_pv, d_pi, d_ov, d_oi);
+        if (status != 0) goto cleanup;
         KF_CHECK(cudaEventRecord(ev1));
-        KF_CHECK(cudaGetLastError());
         KF_CHECK(cudaEventSynchronize(ev1));
         KF_CHECK(cudaEventElapsedTime(&kernel_ms, ev0, ev1));
     }

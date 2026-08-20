@@ -15,6 +15,23 @@
 
 #include "common.cuh"
 
+/* Launch only, for the persistent-corpus path. The handle is created once and
+ * kept: creating one per call is part of the cold path's cost, not a warm
+ * service's. Not thread-safe, which is fine for a single-threaded benchmark. */
+static cublasHandle_t g_handle = NULL;
+
+extern "C" int kf_launch_cublas(const float *d_q, const float *d_X, int B, int N,
+                                int d, float *d_scores) {
+    const float alpha = 1.0f, beta = 0.0f;
+    if (g_handle == NULL && cublasCreate(&g_handle) != CUBLAS_STATUS_SUCCESS)
+        return -2;
+    if (cublasSgemm(g_handle, CUBLAS_OP_T, CUBLAS_OP_N, N, B, d,
+                    &alpha, d_X, d, d_q, d, &beta, d_scores, N)
+        != CUBLAS_STATUS_SUCCESS)
+        return -3;
+    return (int)cudaGetLastError();
+}
+
 extern "C" int kf_cublas(const float *q, const float *X, int B, int N, int d,
                          int k, float *out_vals, int *out_idx,
                          KfTiming *timing) {
