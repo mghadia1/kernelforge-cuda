@@ -49,10 +49,13 @@ which names the next step (register-blocking) without guesswork.
 
 Honest qualifiers, stated up front:
 
-- v4 beats the `cublas` row at every size measured, **but that baseline is
-  cuBLAS GEMM plus a host-side top-k.** Against PyTorch (cuBLAS + device
-  `topk`) v4 still loses, 407.0 vs 340.4 ms. The claim is "beats a cuBLAS +
-  host-top-k pipeline and comes within 1.2x of PyTorch", not "beats cuBLAS".
+- **cuBLAS's GEMM is 2.97x faster than v4's kernel** — 12.94 ms against
+  38.45 ms at N = 1M, B = 32. v4 wins the end-to-end row only because that
+  baseline then spends 9.76 ms copying scores back and 83.79 ms selecting on the
+  CPU. The honest claim is "beats a cuBLAS GEMM + **host-side** top-k pipeline
+  by keeping selection on the device, while losing to cuBLAS's GEMM itself by
+  about 3x" — not "beats cuBLAS". PyTorch is that better GEMM paired with a
+  device-side `topk`, which is why it still wins at 340.4 ms.
 - **At PaperTrail's real size the GPU still loses**: N = 2,039 with one query,
   NumPy 0.650 ms vs v4 1.669 ms. Batch tiling cannot help *through reuse* at
   B = 1 — with one query there is nothing to reuse a loaded byte against, and

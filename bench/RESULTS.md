@@ -164,30 +164,45 @@ holds several query values in registers instead of re-reading them from shared
 memory each step. That is the standard next move in GEMM tuning, and the
 profile is what says so.
 
-## About the cuBLAS comparison
+## About the cuBLAS comparison — measured, and it is not flattering
 
-v4 is faster than the `cublas` row at **every size measured**, from 1.01x at
-N = 1,000,000 / B = 1 to 2.23x at N = 2,039 / B = 32. That claim needs a
-qualifier, and here it is: **that baseline is cuBLAS GEMM plus a host-side
-top-k**, matching the ABI every other version uses. It pays a device-to-host
-copy of the whole score matrix and a serial CPU selection, which v4 does not.
+v4 is faster than the `cublas` row at **every size measured**, 1.01x to 2.23x.
+That looked like the headline until the stage split was actually run. One warm
+call, N = 1,000,000, B = 32:
 
-The fair reading of the three-way comparison:
+| Stage | cublas | v3_topk | v4_batch |
+|---|---:|---:|---:|
+| host→device | 342.92 ms | 359.94 ms | 368.58 ms |
+| **scoring** | **12.94 ms** | 202.55 ms | **38.45 ms** |
+| device→host | 9.76 ms | 0.05 ms | 0.04 ms |
+| host top-k | 83.79 ms | 0.00 ms | 0.00 ms |
+| total | 501.58 ms | 563.23 ms | 408.01 ms |
 
-- against **cuBLAS + host top-k**, v4 wins because it keeps selection on device;
-- against **torch** (cuBLAS + `torch.topk` on device, cached allocator), v4
-  still loses — 340.4 ms against 407.0 ms at N = 1M, B = 32.
+**cuBLAS computes the scores in 12.94 ms. v4 takes 38.45 ms — cuBLAS is 2.97x
+faster at the actual arithmetic.**
 
-So the defensible sentence is *"a hand-written kernel that beats a cuBLAS
-GEMM + host-top-k pipeline and comes within 1.2x of PyTorch"*, not *"beats
-cuBLAS"*. Decomposing the `cublas` row into its own stages would settle how
-much of its deficit is the host top-k; that cell is in the notebook and has not
-been run.
+v4 wins end-to-end only because the baseline pipeline then pays 9.76 ms to copy
+the score matrix back and 83.79 ms to select on the CPU — 93.55 ms of overhead
+v4 does not have. Take that away and v4 loses badly.
 
-Run-to-run variance is real and worth stating: the `cublas` row measured
-461.7 ms in the first session and 505.7 ms in the second at N = 1M, B = 32
-(9.5%), while v0 moved only 1.5%. Differences smaller than about 10% between
-single rows should not be over-read.
+So the correct claim is narrow and worth stating exactly:
+
+> A hand-written kernel that beats a **cuBLAS GEMM + host-side top-k** pipeline
+> end to end, by keeping selection on the device — while losing to cuBLAS's GEMM
+> itself by about 3x.
+
+This also explains the torch row without any hand-waving. torch is cuBLAS's fast
+GEMM *plus* an on-device `topk`: roughly 343 ms of upload, ~13 ms of scoring, and
+a negligible selection, which lands at the ~340 ms it measures. It is the
+combination v4 was trying to approximate, assembled from a better GEMM.
+
+(The `cublas` stages sum to 449.41 ms against a 501.58 ms total; the ~52 ms
+difference is allocation and cuBLAS handle setup inside the timed call.)
+
+Closing the 3x scoring gap is not a tweak. cuBLAS tiles both dimensions with
+register blocking and a tuned tile shape per problem size; v4 tiles eight
+queries and reads them from shared memory every step, which is exactly what its
+78.48% L1/TEX throughput reports.
 
 ## Where the GPU still loses
 
@@ -211,9 +226,11 @@ than by memory traffic. Attributing those wins to batch tiling would be wrong.
 2. **A persistent-corpus benchmark.** The 1.54 GB upload is 90% of v4's call and
    a real system does it once. This now matters more than it did: the faster the
    kernel gets, the more the measurement is just PCIe.
-3. Decompose the `cublas` baseline's stages to size the host-top-k handicap.
-4. Parallelize the final fold in `kf_merge_partials`, still serialized in
+3. Parallelize the final fold in `kf_merge_partials`, still serialized in
    thread 0.
+
+The stage split has been run; the 3x scoring gap to cuBLAS is now the thing to
+attack, and step 1 is the first move in that direction.
 
 ## Limits
 
